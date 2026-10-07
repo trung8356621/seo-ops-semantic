@@ -77,11 +77,18 @@ class TopicAnalyzer:
         t0 = time.perf_counter()
         analysis_id = str(uuid.uuid4())
         prepared = self._prepare_keywords(request.keywords)
-        input_hash = request.input_hash or compute_input_hash(
+        computed_hash = compute_input_hash(
             request.site_ref,
             request.language,
             prepared,
         )
+        if request.input_hash is not None and request.input_hash != "":
+            if request.input_hash != computed_hash:
+                raise ValueError(
+                    "input_hash mismatch: client hash does not match canonical "
+                    "hash of normalized payload"
+                )
+        input_hash = computed_hash
 
         embed_t0 = time.perf_counter()
         embeddings, cache_stats = self._embed_keywords(request.site_ref, prepared)

@@ -38,18 +38,28 @@ class Settings(BaseSettings):
     db_connect_retry_seconds: float = Field(default=2.0, alias="DB_CONNECT_RETRY_SECONDS")
     embedding_lazy_load: bool = Field(default=True, alias="EMBEDDING_LAZY_LOAD")
 
-    # Topic analysis V1 — cosine threshold clustering (see docs / benchmark).
+    # Topic clustering algorithm: average_linkage (default) | greedy_medoid_v2 | greedy_medoid_v1
+    topic_cluster_algorithm: str = Field(
+        default="average_linkage",
+        alias="TOPIC_CLUSTER_ALGORITHM",
+    )
+    # Shared / algorithm-specific thresholds — see README for exact semantics.
+    # average_linkage: similarity cut (distance = 1 - similarity).
+    # greedy_medoid_v2: seed density threshold only.
     topic_cluster_similarity_threshold: float = Field(
-        default=0.70,
+        default=0.74,
         alias="TOPIC_CLUSTER_SIMILARITY_THRESHOLD",
     )
+    # greedy_medoid_v2: final member admission vs seed (independent of density).
+    # Unused by average_linkage (assignment_min_score is the post-guard).
     topic_min_member_similarity: float = Field(
-        default=0.62,
+        default=0.77,
         alias="TOPIC_MIN_MEMBER_SIMILARITY",
     )
     topic_min_group_size: int = Field(default=2, alias="TOPIC_MIN_GROUP_SIZE")
+    # Post-cluster assignment guard + confidence floor (similarity_to_representative).
     topic_assignment_min_score: float = Field(
-        default=0.62,
+        default=0.70,
         alias="TOPIC_ASSIGNMENT_MIN_SCORE",
     )
     topic_low_confidence_score: float = Field(

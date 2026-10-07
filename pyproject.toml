@@ -16,6 +16,7 @@ dependencies = [
   "psycopg[binary]==3.2.6",
   "fastembed==0.6.1",
   "numpy==2.2.5",
+  "scipy==1.15.2",
 ]
 
 [project.optional-dependencies]

@@ -4,7 +4,13 @@ from collections import Counter
 from typing import Mapping, Sequence
 
 from app.config import Settings
-from app.core.clustering import CosineThresholdClusterer, ClusterPoint, ClusterResult
+from app.core.clustering import (
+    ClusterPoint,
+    ClusterResult,
+    CosineAverageLinkageClusterer,
+    CosineThresholdClusterer,
+    CosineThresholdGreedyMedoidV2,
+)
 from app.modules.topic.contracts import (
     TopicGroupMemberOut,
     TopicGroupOut,
@@ -13,16 +19,26 @@ from app.modules.topic.contracts import (
 from app.modules.topic.scoring import cohesion_score, heuristic_confidence
 
 
-def build_clusterer(settings: Settings) -> CosineThresholdClusterer:
-    member_floor = min(
-        settings.topic_min_member_similarity,
-        settings.topic_assignment_min_score,
-    )
-    return CosineThresholdClusterer(
-        similarity_threshold=settings.topic_cluster_similarity_threshold,
-        min_member_similarity=member_floor,
-        min_group_size=settings.topic_min_group_size,
-    )
+def build_clusterer(settings: Settings):
+    algorithm = (settings.topic_cluster_algorithm or "average_linkage").strip().lower()
+    if algorithm in {"average_linkage", "cosine_average_linkage_v1"}:
+        return CosineAverageLinkageClusterer(
+            similarity_threshold=settings.topic_cluster_similarity_threshold,
+            min_group_size=settings.topic_min_group_size,
+        )
+    if algorithm in {"greedy_medoid_v2", "cosine_threshold_greedy_medoid_v2"}:
+        return CosineThresholdGreedyMedoidV2(
+            seed_density_threshold=settings.topic_cluster_similarity_threshold,
+            member_similarity_threshold=settings.topic_min_member_similarity,
+            min_group_size=settings.topic_min_group_size,
+        )
+    if algorithm in {"greedy_medoid_v1", "cosine_threshold_greedy_medoid_v1", "legacy"}:
+        return CosineThresholdClusterer(
+            similarity_threshold=settings.topic_cluster_similarity_threshold,
+            min_member_similarity=settings.topic_min_member_similarity,
+            min_group_size=settings.topic_min_group_size,
+        )
+    raise ValueError(f"unsupported TOPIC_CLUSTER_ALGORITHM={settings.topic_cluster_algorithm!r}")
 
 
 def cluster_points(points: Sequence[ClusterPoint], settings: Settings) -> ClusterResult:
@@ -38,6 +54,9 @@ def materialize_groups_with_scores(
 ) -> tuple[list[TopicGroupOut], list[TopicUnassignedOut], int]:
     """Map generic clusters → Topic proposal groups.
 
+    Assignment guard: members with similarity_to_representative <
+    TOPIC_ASSIGNMENT_MIN_SCORE are moved to unassigned (except the representative).
+
     suggested_label is the medoid member text (deterministic, no LLM).
     similarity_score is cosine-to-representative (not probability).
     confidence is a heuristic rescale above the assignment floor.
@@ -45,12 +64,13 @@ def materialize_groups_with_scores(
     groups: list[TopicGroupOut] = []
     assigned: set[str] = set()
     low_confidence = 0
+    assignment_rejects: list[TopicUnassignedOut] = []
 
     for index, cluster in enumerate(cluster_result.groups, start=1):
         group_ref = f"g-{index:04d}"
         rep_ref = cluster.representative_ref
         member_scores = score_to_rep.get(cluster.group_key, {})
-        members: list[TopicGroupMemberOut] = []
+        kept: list[TopicGroupMemberOut] = []
         scores: list[float] = []
 
         for ref in cluster.member_refs:
@@ -60,10 +80,20 @@ def materialize_groups_with_scores(
                 sim = float(
                     member_scores.get(ref, cluster.mean_score_to_representative)
                 )
+            if ref != rep_ref and sim < settings.topic_assignment_min_score:
+                assignment_rejects.append(
+                    TopicUnassignedOut(
+                        keyword_ref=ref,
+                        text=texts_by_ref[ref],
+                        reason="below_assignment_min_score",
+                    )
+                )
+                continue
+
             conf = heuristic_confidence(sim, settings.topic_assignment_min_score)
             if conf < settings.topic_low_confidence_score and ref != rep_ref:
                 low_confidence += 1
-            members.append(
+            kept.append(
                 TopicGroupMemberOut(
                     keyword_ref=ref,
                     text=texts_by_ref[ref],
@@ -75,23 +105,45 @@ def materialize_groups_with_scores(
             scores.append(sim)
             assigned.add(ref)
 
-        members.sort(key=lambda m: (not m.is_representative, m.keyword_ref))
+        if len(kept) < settings.topic_min_group_size:
+            for member in kept:
+                if member.keyword_ref in assigned:
+                    assigned.discard(member.keyword_ref)
+                assignment_rejects.append(
+                    TopicUnassignedOut(
+                        keyword_ref=member.keyword_ref,
+                        text=member.text,
+                        reason="below_min_group_size_after_assignment",
+                    )
+                )
+            continue
+
+        kept.sort(key=lambda m: (not m.is_representative, m.keyword_ref))
         mean_sim = float(sum(scores) / len(scores)) if scores else 0.0
         min_sim = float(min(scores)) if scores else 0.0
         groups.append(
             TopicGroupOut(
                 group_ref=group_ref,
                 suggested_label=texts_by_ref[rep_ref],
-                member_count=len(members),
+                member_count=len(kept),
                 mean_similarity=round(mean_sim, 6),
                 min_similarity=round(min_sim, 6),
                 cohesion=round(cohesion_score(mean_sim, min_sim), 6),
-                members=members,
+                members=kept,
             )
         )
 
     unassigned: list[TopicUnassignedOut] = []
+    seen_unassigned: set[str] = set()
+    for row in assignment_rejects:
+        if row.keyword_ref in seen_unassigned or row.keyword_ref in assigned:
+            continue
+        unassigned.append(row)
+        seen_unassigned.add(row.keyword_ref)
+
     for ref in cluster_result.unassigned_refs:
+        if ref in assigned or ref in seen_unassigned:
+            continue
         unassigned.append(
             TopicUnassignedOut(
                 keyword_ref=ref,
@@ -99,10 +151,13 @@ def materialize_groups_with_scores(
                 reason="below_threshold_or_small_component",
             )
         )
+        seen_unassigned.add(ref)
+
     for ref, text in texts_by_ref.items():
-        if ref in assigned or any(u.keyword_ref == ref for u in unassigned):
+        if ref in assigned or ref in seen_unassigned:
             continue
         unassigned.append(TopicUnassignedOut(keyword_ref=ref, text=text, reason="not_grouped"))
+        seen_unassigned.add(ref)
 
     unassigned.sort(key=lambda row: row.keyword_ref)
     groups.sort(key=lambda g: g.group_ref)

@@ -32,14 +32,21 @@ docker compose exec semantic-api \
 curl -s http://127.0.0.1:8088/v1/topic/analyses -H 'Content-Type: application/json' -d @request.json
 ```
 
-Defaults (from Vietnamese fixture calibration):
+Defaults (site_id=4 real-data calibration, TASK 3.1):
 
-- `TOPIC_CLUSTER_SIMILARITY_THRESHOLD=0.70`
-- `TOPIC_MIN_MEMBER_SIMILARITY=0.62`
-- `TOPIC_ASSIGNMENT_MIN_SCORE=0.62`
-- algorithm: greedy medoid cosine-threshold (`cosine_threshold_greedy_medoid_v1`)
+- `TOPIC_CLUSTER_ALGORITHM=average_linkage` → `cosine_average_linkage_v1`
+- `TOPIC_CLUSTER_SIMILARITY_THRESHOLD=0.74` (average-linkage cut; distance = 1 − similarity)
+- `TOPIC_ASSIGNMENT_MIN_SCORE=0.74` (post-cluster guard vs representative + confidence floor)
+- `TOPIC_MIN_MEMBER_SIMILARITY=0.77` (used by `greedy_medoid_v2` only)
+- `TOPIC_LOW_CONFIDENCE_SCORE=0.35` (heuristic confidence flag; not a probability)
+
+Threshold semantics are non-redundant. Legacy `cosine_threshold_greedy_medoid_v1` remains available but is not the default (its member floor was dead when ≤ discovery threshold).
+
+`input_hash`: server always computes the canonical hash from the normalized payload. A client-supplied hash must match or the request is rejected (422).
 
 Disposable analysis tables: `topic_analysis_runs`, `topic_analysis_groups`, `topic_analysis_members`.
+
+Real-data note (site 4, 883 keywords): average-linkage @ 0.74 cuts the prior 260-member star hub; analysis remains proposal/evidence only.
 
 ## Non-goals
 

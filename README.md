@@ -51,7 +51,7 @@ Real-data note (site 4, 883 keywords): average-linkage @ 0.74 cuts the prior 260
 
 ## Concept Matching
 
-Generic “is this text semantically similar to these examples?” evidence API.
+Generic concept evidence API: **deterministic lexical** + **semantic cosine** (optional hybrid).
 
 ```bash
 curl.exe -s http://127.0.0.1:8088/v1/concept-matches/analyses `
@@ -59,11 +59,41 @@ curl.exe -s http://127.0.0.1:8088/v1/concept-matches/analyses `
   -d @concept_request.json
 ```
 
-### What it can do
+### Lexical evidence
 
-- Embed entities + concept positive/negative examples with the shared multilingual ONNX model
-- Return cosine similarity evidence (`positive_max`, `positive_top_k_mean`, `negative_max`, `margin`, best examples)
-- Optionally evaluate a caller-supplied `decision_policy` → `suggested_match`
+Deterministic string/token matching against positive (and optional negative) examples.
+
+Modes: `exact` | `prefix` | `token` | `phrase` | `accent_sensitive` | `semantic` (skip lexical).
+
+**Lexical matching is deterministic.** It does not invent cosine scores.
+
+Why cosine alone is not enough for short exact anchors: short Industry Group nouns (e.g. `balo`) can score similarly for true product phrases and unrelated strings such as phone/Zalo noise. Lexical `token`/`phrase` catches the obvious membership; semantic extends synonyms and richer intent.
+
+### Semantic evidence
+
+Cosine similarities vs positive/negative example embeddings:
+
+`positive_max`, `positive_top_k_mean`, `negative_max`, `margin`, best examples.
+
+**Cosine scores are semantic evidence, not probabilities.**
+
+### Matching strategy
+
+Per concept (`matching_strategy`, default **`semantic`** for old clients):
+
+| Strategy | Behavior |
+| --- | --- |
+| `lexical` | Lexical evidence only (no embed of that concept’s examples) |
+| `semantic` | Semantic evidence; lexical still reported when `match_mode` is deterministic |
+| `hybrid` | Both evidences; decision: lexical positive wins; else optional `semantic_fallback` |
+
+### Hybrid policy (`decision_policy`)
+
+- No opaque `0.6 lexical + 0.4 semantic` blend
+- **No universal baked-in threshold** (0.7 / 0.8 / …) — gates are caller-supplied
+- `semantic_fallback` default **`false`** (safe for short Industry Group anchors until calibrated)
+
+When `decision_policy` is omitted, `suggested_match` is `null`.
 
 ### What it cannot do
 
@@ -71,9 +101,7 @@ curl.exe -s http://127.0.0.1:8088/v1/concept-matches/analyses `
 - Mutate Laravel data, create tags, or decide Topic exclusion policy
 - Treat scores as probabilities or confidence percentages
 
-**Scores are cosine similarities, not probabilities.** No LLM / translation / research is performed.
-
-Positive examples are required (≥1). Negative examples are optional contrast signals. When `decision_policy` is omitted, `suggested_match` is `null`.
+Positive examples are required (≥1). Negative examples are optional contrast signals.
 
 V1 is **stateless** (`direct_embed_batch`); it does not write a concept-matching cache namespace and does not change Topic/Keyword Group embedding caches.
 

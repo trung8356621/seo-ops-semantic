@@ -1,0 +1,69 @@
+{
+  "scope_ref": "calib:hybrid-v1",
+  "language": "vi",
+  "entities": [
+    {"ref": "product_1", "text": "balo học sinh cấp 1"},
+    {"ref": "product_2", "text": "xưởng sản xuất balo theo yêu cầu"},
+    {"ref": "product_noise", "text": "Zalo 0909983833"},
+    {"ref": "material_1", "text": "vải canvas chống thấm"},
+    {"ref": "service_1", "text": "xưởng may balo theo yêu cầu"},
+    {"ref": "service_noise", "text": "balo đẹp giá rẻ"},
+    {"ref": "cta_1", "text": "liên hệ ngay"},
+    {"ref": "cta_2", "text": "nhận tư vấn ngay"},
+    {"ref": "cta_3", "text": "đăng ký nhận báo giá"},
+    {"ref": "cta_noise_1", "text": "báo giá balo theo yêu cầu"},
+    {"ref": "cta_noise_2", "text": "giá may balo số lượng lớn"},
+    {"ref": "cta_noise_3", "text": "mua balo học sinh"}
+  ],
+  "concepts": [
+    {
+      "key": "industry.products.balo.test",
+      "match_mode": "token",
+      "matching_strategy": "hybrid",
+      "positive_examples": ["balo", "ba lô", "backpack"],
+      "negative_examples": []
+    },
+    {
+      "key": "industry.materials.canvas.test",
+      "match_mode": "phrase",
+      "matching_strategy": "hybrid",
+      "positive_examples": ["vải canvas", "canvas", "vải bố"],
+      "negative_examples": []
+    },
+    {
+      "key": "industry.services.manufacturing.test",
+      "match_mode": "semantic",
+      "matching_strategy": "semantic",
+      "positive_examples": [
+        "xưởng may balo",
+        "may balo theo yêu cầu",
+        "gia công balo",
+        "đặt may số lượng lớn"
+      ],
+      "negative_examples": ["balo đẹp", "giá balo", "mua balo"]
+    },
+    {
+      "key": "system.cta.test",
+      "match_mode": "semantic",
+      "matching_strategy": "semantic",
+      "positive_examples": [
+        "liên hệ ngay",
+        "nhận tư vấn",
+        "đăng ký ngay",
+        "click vào đây",
+        "gọi ngay"
+      ],
+      "negative_examples": [
+        "báo giá sản phẩm",
+        "giá sản phẩm",
+        "mua sản phẩm",
+        "xưởng sản xuất"
+      ]
+    }
+  ],
+  "decision_policy": {
+    "min_positive_score": 0.55,
+    "min_margin": 0.05,
+    "semantic_fallback": false
+  }
+}

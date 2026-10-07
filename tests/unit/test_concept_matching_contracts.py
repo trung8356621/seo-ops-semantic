@@ -27,6 +27,30 @@ def test_valid_request() -> None:
     req = ConceptMatchAnalysisRequest.model_validate(_base())
     assert req.entities[0].ref == "kw_1"
     assert len(req.concepts[0].positive_examples) == 2
+    assert req.concepts[0].matching_strategy == "semantic"
+    assert req.concepts[0].match_mode == "phrase"
+
+
+def test_hybrid_fields_accepted() -> None:
+    req = ConceptMatchAnalysisRequest.model_validate(
+        _base(
+            concepts=[
+                {
+                    "key": "industry.products.balo",
+                    "positive_examples": ["balo"],
+                    "match_mode": "token",
+                    "matching_strategy": "hybrid",
+                }
+            ],
+            decision_policy={
+                "min_positive_score": 0.55,
+                "semantic_fallback": False,
+            },
+        )
+    )
+    assert req.concepts[0].matching_strategy == "hybrid"
+    assert req.decision_policy is not None
+    assert req.decision_policy.semantic_fallback is False
 
 
 def test_duplicate_entity_refs_rejected() -> None:

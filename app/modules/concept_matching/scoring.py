@@ -65,9 +65,13 @@ def score_entity_against_concept(
 
     suggested: bool | None = None
     if decision_policy is not None:
-        suggested = positive_max >= decision_policy.min_positive_score
-        if suggested and negative_max is not None and margin is not None:
-            suggested = margin >= decision_policy.min_margin
+        # Kept for unit tests / direct callers. Analyzer uses decision.apply_semantic_gate.
+        if decision_policy.min_positive_score is None:
+            suggested = False
+        else:
+            suggested = positive_max >= decision_policy.min_positive_score
+            if suggested and negative_max is not None and margin is not None:
+                suggested = margin >= decision_policy.min_margin
 
     return ConceptScoreEvidence(
         positive_max=positive_max,

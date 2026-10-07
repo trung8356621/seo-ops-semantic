@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.text.normalization import normalize_text
+
+MatchMode = Literal["exact", "prefix", "token", "phrase", "accent_sensitive", "semantic"]
+MatchingStrategy = Literal["lexical", "semantic", "hybrid"]
 
 
 def _dedupe_preserve(values: list[str]) -> list[str]:
@@ -42,6 +47,14 @@ class ConceptDefinitionIn(BaseModel):
     key: str = Field(min_length=1, max_length=191)
     positive_examples: list[str] = Field(min_length=1)
     negative_examples: list[str] = Field(default_factory=list)
+    match_mode: MatchMode = Field(
+        default="phrase",
+        description="Deterministic lexical mode, or 'semantic' to skip lexical.",
+    )
+    matching_strategy: MatchingStrategy = Field(
+        default="semantic",
+        description="lexical | semantic | hybrid. Default semantic preserves old clients.",
+    )
 
     @field_validator("key")
     @classmethod
@@ -68,12 +81,33 @@ class ConceptDefinitionIn(BaseModel):
         self.negative_examples = negatives
         return self
 
+    def needs_semantic(self) -> bool:
+        """Whether embeddings are required for this concept."""
+        if self.matching_strategy == "lexical":
+            return False
+        return True
+
 
 class ConceptDecisionPolicy(BaseModel):
-    """Optional caller-supplied gates. Scores remain cosine similarities, not probabilities."""
+    """Optional caller-supplied gates. Scores remain cosine similarities, not probabilities.
 
-    min_positive_score: float = Field(ge=-1.0, le=1.0)
+    No universal baked-in threshold — callers choose gates per concept shape.
+    """
+
+    min_positive_score: float | None = Field(
+        default=None,
+        ge=-1.0,
+        le=1.0,
+        description="Semantic gate; required for semantic strategy decisions.",
+    )
     min_margin: float = Field(default=0.0, ge=-2.0, le=2.0)
+    semantic_fallback: bool = Field(
+        default=False,
+        description=(
+            "Hybrid only: when lexical does not match, optionally apply semantic gate. "
+            "V1 default false keeps short Industry Group anchors safe."
+        ),
+    )
 
 
 class ConceptMatchAnalysisRequest(BaseModel):
@@ -110,22 +144,38 @@ class ConceptMatchAnalysisRequest(BaseModel):
         return self
 
 
+class LexicalEvidenceOut(BaseModel):
+    matched: bool
+    match_mode: str
+    matched_examples: list[str] = Field(default_factory=list)
+    best_match: str | None = None
+    negative_matched: bool = False
+    negative_matched_examples: list[str] = Field(default_factory=list)
+
+
 class ConceptScoreOut(BaseModel):
     key: str
-    positive_max: float = Field(description="Max cosine similarity to any positive example.")
-    positive_top_k_mean: float = Field(
-        description="Mean of top-K positive cosine similarities (K=min(3, n_positives))."
+    lexical: LexicalEvidenceOut
+    matching_strategy: MatchingStrategy
+    # Semantic cosine evidence — null when strategy=lexical (not embedded).
+    positive_max: float | None = Field(
+        default=None,
+        description="Max cosine similarity to any positive example.",
+    )
+    positive_top_k_mean: float | None = Field(
+        default=None,
+        description="Mean of top-K positive cosine similarities (K=min(3, n_positives)).",
     )
     negative_max: float | None = Field(
         default=None,
-        description="Max cosine similarity to any negative example, or null when none.",
+        description="Max cosine similarity to any negative example, or null when none/skipped.",
     )
     margin: float | None = Field(
         default=None,
         description="positive_max - negative_max when negatives exist; otherwise null.",
     )
-    best_positive_example: str
-    best_positive_similarity: float
+    best_positive_example: str | None = None
+    best_positive_similarity: float | None = None
     best_negative_example: str | None = None
     best_negative_similarity: float | None = None
     suggested_match: bool | None = Field(
@@ -151,6 +201,8 @@ class ConceptMatchDiagnostics(BaseModel):
     provider: str
     dimensions: int
     cache: str = Field(description="V1 uses direct embed_batch; no persistent text cache.")
+    semantic_concepts: int = 0
+    lexical_only_concepts: int = 0
 
 
 class ConceptMatchAnalysisResponse(BaseModel):

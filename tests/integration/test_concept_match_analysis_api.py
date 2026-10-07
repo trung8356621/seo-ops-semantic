@@ -56,6 +56,8 @@ def test_concept_match_endpoint_shape(client: TestClient) -> None:
     assert body["scope_ref"] == "site:4"
     score = body["entities"][0]["concepts"][0]
     assert "positive_max" in score
+    assert "lexical" in score
+    assert score["matching_strategy"] == "semantic"
     assert score["suggested_match"] is None
     assert body["diagnostics"]["cache"] == "direct_embed_batch"
 

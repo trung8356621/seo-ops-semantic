@@ -113,7 +113,10 @@ def test_batch_embedding_and_response_shape() -> None:
     a = response.entities[0].concepts[0]
     b = response.entities[1].concepts[0]
     assert a.key == "custom.recruitment"
+    assert a.matching_strategy == "semantic"
+    assert a.lexical is not None
     assert a.suggested_match is None
+    assert a.positive_max is not None and b.positive_max is not None
     assert a.positive_max > b.positive_max
     assert a.margin is not None
     assert b.margin is not None

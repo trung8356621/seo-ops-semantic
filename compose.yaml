@@ -1,0 +1,65 @@
+name: seo-ops-semantic
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-semantic}
+      POSTGRES_USER: ${POSTGRES_USER:-semantic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-semantic_local_change_me}
+    volumes:
+      - ${POSTGRES_DATA:-postgres_data}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # Local-only: published on localhost. Not for production exposure.
+    ports:
+      - "127.0.0.1:5433:5432"
+    restart: unless-stopped
+
+  semantic-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      APP_NAME: ${APP_NAME:-seo-ops-semantic}
+      APP_HOST: ${APP_HOST:-0.0.0.0}
+      APP_PORT: ${APP_PORT:-8088}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-1}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-semantic}
+      POSTGRES_USER: ${POSTGRES_USER:-semantic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-semantic_local_change_me}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-onnx_fastembed}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      MODEL_CACHE_DIR: /models
+      HF_HOME: /models/hf
+      FASTEMBED_CACHE_PATH: /models/fastembed
+      HF_HUB_DISABLE_SYMLINKS_WARNING: "1"
+      DB_CONNECT_RETRIES: ${DB_CONNECT_RETRIES:-30}
+      DB_CONNECT_RETRY_SECONDS: ${DB_CONNECT_RETRY_SECONDS:-2}
+      EMBEDDING_LAZY_LOAD: ${EMBEDDING_LAZY_LOAD:-true}
+    volumes:
+      - ${SEMANTIC_MODEL_CACHE:-model_cache}:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${APP_PORT:-8088}:8088"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8088/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  model_cache:

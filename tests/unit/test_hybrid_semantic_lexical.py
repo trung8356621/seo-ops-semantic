@@ -7,6 +7,7 @@ import numpy as np
 from app.config import Settings
 from app.core.clustering import ClusterPoint
 from app.core.embedding.contracts import EmbeddingResult
+from app.core.text.lexical import pair_evidence
 from app.core.text.normalization import normalize_text
 from app.modules.keyword_grouping.analyzer import KeywordGroupAnalyzer
 from app.modules.keyword_grouping.contracts import KeywordGroupAnalysisRequest, KeywordIn
@@ -89,14 +90,10 @@ class ScriptedEmbedding:
 
 
 def _group_member_sets(groups) -> list[set[str]]:  # noqa: ANN001
-    return [ {m.ref for m in g.members} for g in groups ]
+    return [{m.ref for m in g.members} for g in groups]
 
 
 def test_case_a_school_student_split_despite_high_cosine() -> None:
-    # All balo* near the same semantic pole (simulates Postman ~0.93–0.97).
-    balo_pole = _unit([1.0, 0.08, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0])
-    bag_pole = _unit([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    suitcase_pole = _unit([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     texts = {
         "1": "balo học sinh",
         "2": "balo cho học sinh",
@@ -106,12 +103,12 @@ def test_case_a_school_student_split_despite_high_cosine() -> None:
         "6": "vali kéo du lịch",
     }
     vectors = {
-        texts["1"]: balo_pole,
+        texts["1"]: _unit([1.0, 0.08, 0.02, 0.0, 0.0, 0.0, 0.0, 0.0]),
         texts["2"]: _unit([1.0, 0.09, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0]),
         texts["3"]: _unit([1.0, 0.07, 0.03, 0.0, 0.0, 0.0, 0.0, 0.0]),
         texts["4"]: _unit([1.0, 0.075, 0.025, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        texts["5"]: bag_pole,
-        texts["6"]: suitcase_pole,
+        texts["5"]: _unit([0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        texts["6"]: _unit([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
     }
     points = [ClusterPoint(ref=ref, vector=vectors[text]) for ref, text in texts.items()]
     groups, unassigned, diag, _cfg = run_hybrid_semantic_lexical_v1(
@@ -123,80 +120,91 @@ def test_case_a_school_student_split_despite_high_cosine() -> None:
     assert {"1", "2"} in member_sets
     assert {"3", "4"} in member_sets
     assert len(groups) == 2
-    un_refs = {u.ref for u in unassigned}
-    assert un_refs == {"5", "6"}
-    # Critical: families must not merge.
+    assert {u.ref for u in unassigned} == {"5", "6"}
     for members in member_sets:
         assert not ({"1", "3"} <= members)
         assert not ({"2", "4"} <= members)
     assert diag.lexical_reject_count >= 1
-    assert diag.strategy == "hybrid_semantic_lexical_v1"
+    assert diag.ambiguous_count == 0
 
 
 def test_case_b_recall_and_no_bridge() -> None:
-    school = _unit([1.0, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    student = _unit([0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    # Bridge sits between poles (high sim to both families).
+    # Cross-family cosine intentionally high (real Postman shape); lexical must split.
     bridge = _unit([0.75, 0.75, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    control_a = _unit([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-    control_b = _unit([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
-    control_c = _unit([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
-
     keywords = [
-        ("hs-01", "balo học sinh", _unit([1.0, 0.04, 0.01, 0, 0, 0, 0, 0])),
-        ("hs-02", "cặp học sinh", _unit([0.98, 0.06, 0.02, 0, 0, 0, 0, 0])),
-        ("hs-03", "giúp bạn chọn mua balo học sinh", _unit([0.97, 0.05, 0.03, 0, 0, 0, 0, 0])),
-        ("hs-04", "xưởng may balo học sinh giá tốt nhất tại Hợp Phát", _unit([0.96, 0.07, 0.02, 0, 0, 0, 0, 0])),
-        ("hs-05", "xưởng may cặp học sinh cấp 1 tại Hợp Phát", _unit([0.95, 0.08, 0.01, 0, 0, 0, 0, 0])),
-        ("hs-06", "xưởng may balo học sinh tại Hợp Phát", _unit([0.99, 0.03, 0.02, 0, 0, 0, 0, 0])),
+        ("hs-01", "balo học sinh", _unit([1.0, 0.20, 0.01, 0, 0, 0, 0, 0])),
+        ("hs-02", "cặp học sinh", _unit([0.98, 0.22, 0.02, 0, 0, 0, 0, 0])),
+        ("hs-03", "giúp bạn chọn mua balo học sinh", _unit([0.97, 0.21, 0.03, 0, 0, 0, 0, 0])),
+        ("hs-04", "xưởng may balo học sinh giá tốt nhất tại Hợp Phát", _unit([0.96, 0.23, 0.02, 0, 0, 0, 0, 0])),
+        ("hs-05", "xưởng may cặp học sinh cấp 1 tại Hợp Phát", _unit([0.95, 0.24, 0.01, 0, 0, 0, 0, 0])),
+        ("hs-06", "xưởng may balo học sinh tại Hợp Phát", _unit([0.99, 0.19, 0.02, 0, 0, 0, 0, 0])),
         ("mix-01", "xưởng sản xuất balo học sinh - sinh viên tại tphcm", bridge),
-        ("sv-01", "balo sinh viên", _unit([0.04, 1.0, 0.01, 0, 0, 0, 0, 0])),
-        ("sv-02", "balo giá rẻ cho sinh viên", _unit([0.06, 0.98, 0.02, 0, 0, 0, 0, 0])),
-        ("sv-03", "balo cho sinh viên đại học", _unit([0.05, 0.97, 0.03, 0, 0, 0, 0, 0])),
-        ("ctrl-01", "túi canvas", control_a),
-        ("ctrl-02", "balo laptop", control_b),
-        ("ctrl-03", "vali kéo du lịch", control_c),
+        ("sv-01", "balo sinh viên", _unit([0.20, 1.0, 0.01, 0, 0, 0, 0, 0])),
+        ("sv-02", "balo giá rẻ cho sinh viên", _unit([0.22, 0.98, 0.02, 0, 0, 0, 0, 0])),
+        ("sv-03", "balo cho sinh viên đại học", _unit([0.21, 0.97, 0.03, 0, 0, 0, 0, 0])),
+        ("ctrl-01", "túi canvas", _unit([0.0, 0.0, 1.0, 0, 0, 0, 0, 0])),
+        ("ctrl-02", "balo laptop", _unit([0.0, 0.0, 0.0, 1.0, 0, 0, 0, 0])),
+        ("ctrl-03", "vali kéo du lịch", _unit([0.0, 0.0, 0.0, 0.0, 1.0, 0, 0, 0])),
     ]
-    # Ensure school/student poles are used (lint silence for unused).
-    assert school and student
-
     texts = {ref: text for ref, text, _vec in keywords}
     points = [ClusterPoint(ref=ref, vector=vec) for ref, _text, vec in keywords]
-    groups, unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
+    groups, unassigned, diag, _cfg = run_hybrid_semantic_lexical_v1(
         points=points,
         texts_by_ref=texts,
         settings=_settings(),
     )
 
-    by_ref = {m.ref: g for g in groups for m in g.members}
     hs_refs = {f"hs-0{i}" for i in range(1, 7)}
     sv_refs = {"sv-01", "sv-02", "sv-03"}
-
-    # School family materially grouped together.
-    hs_groups = {id(by_ref[r]) for r in hs_refs if r in by_ref}
-    assert len(hs_groups) == 1
     school_group = next(g for g in groups if any(m.ref.startswith("hs-") for m in g.members))
-    school_members = {m.ref for m in school_group.members}
-    assert len(school_members & hs_refs) >= 5
-
-    # Student family complete and separate.
     student_group = next(g for g in groups if any(m.ref.startswith("sv-") for m in g.members))
+    school_members = {m.ref for m in school_group.members}
     student_members = {m.ref for m in student_group.members}
+
+    assert hs_refs <= school_members
     assert sv_refs <= student_members
     assert school_members.isdisjoint(student_members)
 
     un_map = {u.ref: u.reason for u in unassigned}
-    assert "mix-01" in un_map
     assert un_map["mix-01"] == "ambiguous_multiple_groups"
     for ctrl in ("ctrl-01", "ctrl-02", "ctrl-03"):
         assert ctrl in un_map
-        assert ctrl not in school_members
-        assert ctrl not in student_members
+    assert diag.ambiguous_count == 1
+    assert diag.rescue_assignment_count >= 0
+    # No school/student keyword stuck as ambiguous.
+    for ref in hs_refs | sv_refs:
+        assert ref not in un_map
+
+
+def test_hs02_style_shared_anchor_not_lexical_conflict() -> None:
+    """Leading nouns differ; shared informative n-gram still binds."""
+    ev = pair_evidence("cặp alpha beta", "sản phẩm alpha beta")
+    assert ev.compatible
+    assert not ev.conflict
+    assert "alpha beta" in ev.shared_ngrams
+
+    texts = {
+        "a": "cặp alpha beta",
+        "b": "sản phẩm alpha beta",
+        "c": "factory alpha beta goods",
+    }
+    pole = _unit([1.0, 0.05, 0, 0, 0, 0, 0, 0])
+    points = [
+        ClusterPoint(ref="a", vector=pole),
+        ClusterPoint(ref="b", vector=_unit([0.98, 0.06, 0, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="c", vector=_unit([0.97, 0.07, 0, 0, 0, 0, 0, 0])),
+    ]
+    groups, unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
+        points=points,
+        texts_by_ref=texts,
+        settings=_settings(),
+    )
+    assert len(groups) == 1
+    assert {m.ref for m in groups[0].members} == {"a", "b", "c"}
+    assert unassigned == []
 
 
 def test_property_distinct_modifiers_not_merged_by_cosine_alone() -> None:
-    """Synthetic product+modifierA vs product+modifierB — no phrase hardcoding."""
-    pole = _unit([1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     texts = {
         "a1": "widget alpha beta",
         "a2": "widget cho alpha beta",
@@ -205,7 +213,7 @@ def test_property_distinct_modifiers_not_merged_by_cosine_alone() -> None:
         "z": "totally unrelated phrase",
     }
     points = [
-        ClusterPoint(ref="a1", vector=pole),
+        ClusterPoint(ref="a1", vector=_unit([1.0, 0.0, 0, 0, 0, 0, 0, 0])),
         ClusterPoint(ref="a2", vector=_unit([0.99, 0.01, 0, 0, 0, 0, 0, 0])),
         ClusterPoint(ref="b1", vector=_unit([0.98, 0.02, 0, 0, 0, 0, 0, 0])),
         ClusterPoint(ref="b2", vector=_unit([0.97, 0.03, 0, 0, 0, 0, 0, 0])),
@@ -224,14 +232,46 @@ def test_property_distinct_modifiers_not_merged_by_cosine_alone() -> None:
     assert any(u.ref == "z" for u in unassigned)
 
 
+def test_property_families_and_bridge_generic() -> None:
+    texts = {
+        "a1": "widget alpha beta",
+        "a2": "premium widget alpha beta",
+        "a3": "factory alpha beta widget",
+        "b1": "widget gamma delta",
+        "b2": "cheap widget gamma delta",
+        "b3": "factory gamma delta widget",
+        "bridge": "widget alpha beta gamma delta",
+    }
+    # High mutual cosine across board — lexical decides families / bridge.
+    points = [
+        ClusterPoint(ref="a1", vector=_unit([1.0, 0.10, 0.02, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="a2", vector=_unit([0.99, 0.11, 0.02, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="a3", vector=_unit([0.98, 0.12, 0.03, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="b1", vector=_unit([0.97, 0.13, 0.02, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="b2", vector=_unit([0.96, 0.14, 0.03, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="b3", vector=_unit([0.95, 0.15, 0.02, 0, 0, 0, 0, 0])),
+        ClusterPoint(ref="bridge", vector=_unit([0.94, 0.16, 0.04, 0, 0, 0, 0, 0])),
+    ]
+    groups, unassigned, diag, _cfg = run_hybrid_semantic_lexical_v1(
+        points=points,
+        texts_by_ref=texts,
+        settings=_settings(),
+    )
+    member_sets = _group_member_sets(groups)
+    assert {"a1", "a2", "a3"} in member_sets
+    assert {"b1", "b2", "b3"} in member_sets
+    un_map = {u.ref: u.reason for u in unassigned}
+    assert un_map["bridge"] == "ambiguous_multiple_groups"
+    assert diag.ambiguous_count == 1
+
+
 def test_property_same_modifier_with_extra_words_groups() -> None:
-    pole = _unit([1.0, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     texts = {
         "1": "gadget red blue",
         "2": "best price gadget red blue store nearby",
     }
     points = [
-        ClusterPoint(ref="1", vector=pole),
+        ClusterPoint(ref="1", vector=_unit([1.0, 0.1, 0, 0, 0, 0, 0, 0])),
         ClusterPoint(ref="2", vector=_unit([0.96, 0.12, 0.02, 0, 0, 0, 0, 0])),
     ]
     groups, unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
@@ -300,7 +340,6 @@ def test_analyzer_case_a_end_to_end_and_cache_namespace() -> None:
     assert embedding.calls == 1
     assert second.diagnostics.embedding_cache["hits"] == 6
     assert second.diagnostics.embedding_cache["misses"] == 0
-
     sets = _group_member_sets(first.groups)
     assert {"1", "2"} in sets
     assert {"3", "4"} in sets

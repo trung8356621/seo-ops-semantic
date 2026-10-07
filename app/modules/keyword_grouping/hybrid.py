@@ -1,17 +1,25 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Mapping, Sequence
 
 import numpy as np
 
 from app.config import Settings
 from app.core.clustering import ClusterPoint
-from app.core.text.lexical import pair_evidence
+from app.core.text.lexical import content_tokens, informative_ngrams, pair_evidence
 from app.modules.keyword_grouping.contracts import GroupMemberOut, GroupOut, UnassignedOut
 from app.modules.keyword_grouping.scoring import cohesion_score
 
 ALGORITHM = "hybrid_semantic_lexical_v1"
+
+
+class PairRelation(str, Enum):
+    COMPATIBLE = "compatible"
+    INCOMPATIBLE = "incompatible"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -25,9 +33,18 @@ class HybridDiagnostics:
 
 
 @dataclass
+class GroupCompatResult:
+    accepted: bool
+    score: float
+    conflict: bool
+    shared_anchors: frozenset[str] = field(default_factory=frozenset)
+
+
+@dataclass
 class _MutableGroup:
     members: set[str] = field(default_factory=set)
     representative_ref: str = ""
+    anchor_ngrams: frozenset[str] = field(default_factory=frozenset)
 
 
 def _cosine_matrix(points: Sequence[ClusterPoint]) -> tuple[list[str], np.ndarray]:
@@ -45,19 +62,25 @@ def _sim(sim: np.ndarray, index: dict[str, int], a: str, b: str) -> float:
     return float(sim[index[a], index[b]])
 
 
-def _is_bridge_node(
-    ref: str,
-    neighbors: Mapping[str, set[str]],
-    compatible: Mapping[tuple[str, str], bool],
-) -> bool:
-    """Node adjacent to two mutually incompatible neighbors → bridging risk."""
-    neigh = sorted(neighbors.get(ref, ()))
-    for i, a in enumerate(neigh):
-        for b in neigh[i + 1 :]:
-            key = (a, b) if a < b else (b, a)
-            if not compatible.get(key, False):
-                return True
-    return False
+def _pair_key(a: str, b: str) -> tuple[str, str]:
+    return (a, b) if a < b else (b, a)
+
+
+def classify_pair_relation(
+    *,
+    text_a: str,
+    text_b: str,
+    cosine: float,
+    semantic_floor: float,
+    containment_min: float,
+) -> tuple[PairRelation, object]:
+    """Three-state pair relation. Cosine alone never yields COMPATIBLE."""
+    evidence = pair_evidence(text_a, text_b, containment_min=containment_min)
+    if evidence.conflict:
+        return PairRelation.INCOMPATIBLE, evidence
+    if evidence.compatible and cosine >= semantic_floor:
+        return PairRelation.COMPATIBLE, evidence
+    return PairRelation.UNKNOWN, evidence
 
 
 def _pick_medoid(members: set[str], sim: np.ndarray, index: dict[str, int]) -> str:
@@ -72,18 +95,155 @@ def _pick_medoid(members: set[str], sim: np.ndarray, index: dict[str, int]) -> s
     return best_ref
 
 
-def _compatible_with_all(
-    ref: str,
+def _member_ngrams(text: str) -> frozenset[str]:
+    return informative_ngrams(content_tokens(text))
+
+
+def compute_group_anchors(
     members: set[str],
-    compatible: Mapping[tuple[str, str], bool],
-) -> bool:
-    for other in members:
-        if other == ref:
+    texts_by_ref: Mapping[str, str],
+) -> frozenset[str]:
+    """Discover repeated informative n-grams from members (not hardcoded)."""
+    counts: Counter[str] = Counter()
+    for ref in members:
+        for ng in _member_ngrams(texts_by_ref[ref]):
+            # Prefer multi-token anchors; length-2 carries most modifier signal.
+            if len(ng.split()) >= 2:
+                counts[ng] += 1
+    if not counts:
+        return frozenset()
+    # Require support from >=2 members when group is large enough; else keep all.
+    min_support = 2 if len(members) >= 2 else 1
+    anchors = {ng for ng, c in counts.items() if c >= min_support}
+    if anchors:
+        return frozenset(anchors)
+    # Fallback: most frequent bigrams.
+    top = [ng for ng, _ in counts.most_common(3)]
+    return frozenset(top)
+
+
+def _conflict_ngram_pairs_from_incompatible(
+    relations: Mapping[tuple[str, str], PairRelation],
+    texts_by_ref: Mapping[str, str],
+    containment_min: float,
+) -> frozenset[tuple[str, str]]:
+    """Discover exclusive informative-ngram pairs from INCOMPATIBLE edges."""
+    pairs: set[tuple[str, str]] = set()
+    for (a, b), rel in relations.items():
+        if rel is not PairRelation.INCOMPATIBLE:
             continue
-        key = (ref, other) if ref < other else (other, ref)
-        if not compatible.get(key, False):
-            return False
-    return True
+        evidence = pair_evidence(
+            texts_by_ref[a],
+            texts_by_ref[b],
+            containment_min=containment_min,
+        )
+        # Prefer length-2 exclusives as competing modifiers.
+        ex_a = {ng for ng in evidence.exclusive_ngrams_a if len(ng.split()) == 2}
+        ex_b = {ng for ng in evidence.exclusive_ngrams_b if len(ng.split()) == 2}
+        for left in ex_a:
+            for right in ex_b:
+                pairs.add(_pair_key(left, right))
+    return frozenset(pairs)
+
+
+def _is_dual_anchor_node(
+    ref: str,
+    texts_by_ref: Mapping[str, str],
+    conflict_ngram_pairs: frozenset[tuple[str, str]],
+) -> bool:
+    """True when keyword contains both sides of a discovered conflict n-gram pair."""
+    ngrams = _member_ngrams(texts_by_ref[ref])
+    for left, right in conflict_ngram_pairs:
+        if left in ngrams and right in ngrams:
+            return True
+    return False
+
+
+def evaluate_keyword_against_group(
+    *,
+    ref: str,
+    group: _MutableGroup,
+    texts_by_ref: Mapping[str, str],
+    sim: np.ndarray,
+    index: dict[str, int],
+    relations: Mapping[tuple[str, str], PairRelation],
+    semantic_floor: float,
+    containment_min: float,
+) -> GroupCompatResult:
+    """Group-level compatibility (not full pairwise clique)."""
+    if not group.members:
+        return GroupCompatResult(accepted=False, score=0.0, conflict=False)
+
+    rep = group.representative_ref or next(iter(sorted(group.members)))
+    cosine_rep = _sim(sim, index, ref, rep)
+    if cosine_rep < semantic_floor:
+        return GroupCompatResult(accepted=False, score=cosine_rep, conflict=False)
+
+    anchors = group.anchor_ngrams or compute_group_anchors(group.members, texts_by_ref)
+    cand_ngrams = _member_ngrams(texts_by_ref[ref])
+    shared_anchors = frozenset(cand_ngrams & anchors)
+
+    # Lexical vs representative.
+    ev_rep = pair_evidence(
+        texts_by_ref[ref],
+        texts_by_ref[rep],
+        containment_min=containment_min,
+    )
+
+    # Strong conflict: exclusive modifiers vs group and no shared group anchor.
+    if ev_rep.conflict and not shared_anchors:
+        # Confirm against a majority of members (one outlier must not veto).
+        conflict_hits = 0
+        checked = 0
+        for member in group.members:
+            checked += 1
+            ev = pair_evidence(
+                texts_by_ref[ref],
+                texts_by_ref[member],
+                containment_min=containment_min,
+            )
+            if ev.conflict and not (cand_ngrams & _member_ngrams(texts_by_ref[member])):
+                conflict_hits += 1
+        if checked > 0 and conflict_hits / checked >= 0.5:
+            return GroupCompatResult(
+                accepted=False,
+                score=cosine_rep,
+                conflict=True,
+                shared_anchors=shared_anchors,
+            )
+
+    # Member support via positive relations or shared n-grams.
+    support = 0
+    for member in group.members:
+        key = _pair_key(ref, member)
+        if relations.get(key) is PairRelation.COMPATIBLE:
+            support += 1
+            continue
+        ev = pair_evidence(
+            texts_by_ref[ref],
+            texts_by_ref[member],
+            containment_min=containment_min,
+        )
+        if ev.compatible and not ev.conflict:
+            # Lexical OK; allow slightly softer semantic vs individual members.
+            if _sim(sim, index, ref, member) >= semantic_floor * 0.9:
+                support += 1
+
+    min_support = 1 if len(group.members) <= 2 else max(1, (len(group.members) + 2) // 3)
+    has_rep_compat = (ev_rep.compatible and not ev_rep.conflict) or bool(shared_anchors)
+    accepted = has_rep_compat and (bool(shared_anchors) or support >= min_support or ev_rep.compatible)
+
+    score = cosine_rep
+    if shared_anchors:
+        score += 0.12 + 0.03 * min(3, len(shared_anchors))
+    score += 0.02 * support
+
+    return GroupCompatResult(
+        accepted=accepted,
+        score=float(score),
+        conflict=False,
+        shared_anchors=shared_anchors,
+    )
 
 
 def run_hybrid_semantic_lexical_v1(
@@ -92,11 +252,7 @@ def run_hybrid_semantic_lexical_v1(
     texts_by_ref: Mapping[str, str],
     settings: Settings,
 ) -> tuple[list[GroupOut], list[UnassignedOut], HybridDiagnostics, dict[str, object]]:
-    """Hybrid grouping: semantic candidates + lexical guard + rescue.
-
-    Avoids transitive bridging by excluding ambiguous multi-family nodes from
-    primary clique growth, then leaving them unassigned when rescue is ambiguous.
-    """
+    """Hybrid V2.1: positive-edge graph + group anchors + post-group ambiguity."""
     diag = HybridDiagnostics()
     config = {
         "semantic_candidate_floor": settings.keyword_group_semantic_floor,
@@ -104,6 +260,7 @@ def run_hybrid_semantic_lexical_v1(
         "containment_min": settings.keyword_group_containment_min,
         "min_group_size": settings.keyword_group_min_group_size,
         "ambiguity_margin": settings.keyword_group_ambiguity_margin,
+        "version": "v2.1",
     }
 
     if not points:
@@ -112,209 +269,195 @@ def run_hybrid_semantic_lexical_v1(
     refs, sim = _cosine_matrix(points)
     index = {ref: i for i, ref in enumerate(refs)}
     floor = float(settings.keyword_group_semantic_floor)
+    rescue_floor = float(settings.keyword_group_rescue_semantic_floor)
     containment_min = float(settings.keyword_group_containment_min)
     min_size = int(settings.keyword_group_min_group_size)
+    ambiguity_margin = float(settings.keyword_group_ambiguity_margin)
 
-    compatible: dict[tuple[str, str], bool] = {}
-    conflict_pairs: set[tuple[str, str]] = set()
+    relations: dict[tuple[str, str], PairRelation] = {}
     edge_score: dict[tuple[str, str], float] = {}
     neighbors: dict[str, set[str]] = {ref: set() for ref in refs}
 
     for i, a in enumerate(refs):
         for b in refs[i + 1 :]:
             cosine = float(sim[i, index[b]])
-            evidence = pair_evidence(
-                texts_by_ref[a],
-                texts_by_ref[b],
+            rel, evidence = classify_pair_relation(
+                text_a=texts_by_ref[a],
+                text_b=texts_by_ref[b],
+                cosine=cosine,
+                semantic_floor=floor,
                 containment_min=containment_min,
             )
             key = (a, b)
-            if evidence.conflict or not evidence.compatible:
-                compatible[key] = False
-                if evidence.conflict and cosine >= floor:
-                    conflict_pairs.add(key)
-                    diag.lexical_reject_count += 1
+            relations[key] = rel
+            if rel is PairRelation.INCOMPATIBLE and cosine >= floor:
+                diag.lexical_reject_count += 1
                 continue
-            if cosine < floor:
-                compatible[key] = False
+            if rel is not PairRelation.COMPATIBLE:
                 continue
-            compatible[key] = True
-            strength = cosine + (0.15 if evidence.shared_ngrams else 0.0) + 0.05 * evidence.containment
+            # Positive edge only.
+            shared = getattr(evidence, "shared_ngrams", frozenset())
+            containment = float(getattr(evidence, "containment", 0.0))
+            strength = cosine + (0.15 if shared else 0.0) + 0.05 * containment
             edge_score[key] = strength
             neighbors[a].add(b)
             neighbors[b].add(a)
             diag.semantic_candidate_edges += 1
 
-    bridges = {ref for ref in refs if _is_bridge_node(ref, neighbors, compatible)}
-    primary_nodes = [ref for ref in refs if ref not in bridges]
-    unassigned_reason: dict[str, str] = {}
-    for ref in bridges:
-        unassigned_reason[ref] = "ambiguous_multiple_groups"
-        diag.ambiguous_count += 1
+    conflict_ngram_pairs = _conflict_ngram_pairs_from_incompatible(
+        relations, texts_by_ref, containment_min
+    )
+    dual_anchor = {
+        ref for ref in refs if _is_dual_anchor_node(ref, texts_by_ref, conflict_ngram_pairs)
+    }
 
-    # Greedy clique growth on non-bridge nodes, strongest edges first.
+    primary_pool = [ref for ref in refs if ref not in dual_anchor]
+    unassigned_reason: dict[str, str] = {}
     assigned: set[str] = set()
     groups: list[_MutableGroup] = []
+
     ranked_edges = sorted(
         (
             (score, a, b)
             for (a, b), score in edge_score.items()
-            if a in primary_nodes and b in primary_nodes
+            if a in primary_pool and b in primary_pool
         ),
         key=lambda row: (-row[0], row[1], row[2]),
     )
+
+    def _refresh(group: _MutableGroup) -> None:
+        group.representative_ref = _pick_medoid(group.members, sim, index)
+        group.anchor_ngrams = compute_group_anchors(group.members, texts_by_ref)
+
+    def _try_join(ref: str, group: _MutableGroup, *, semantic_floor: float) -> bool:
+        result = evaluate_keyword_against_group(
+            ref=ref,
+            group=group,
+            texts_by_ref=texts_by_ref,
+            sim=sim,
+            index=index,
+            relations=relations,
+            semantic_floor=semantic_floor,
+            containment_min=containment_min,
+        )
+        if not result.accepted or result.conflict:
+            return False
+        group.members.add(ref)
+        assigned.add(ref)
+        unassigned_reason.pop(ref, None)
+        _refresh(group)
+        return True
 
     for _score, a, b in ranked_edges:
         if a in assigned and b in assigned:
             continue
         if a not in assigned and b not in assigned:
-            group = _MutableGroup(members={a, b})
-            # Grow greedily: add nodes fully compatible with all members.
+            seed = _MutableGroup(members={a, b})
+            _refresh(seed)
             grew = True
             while grew:
                 grew = False
-                for cand in primary_nodes:
-                    if cand in group.members or cand in assigned:
+                for cand in primary_pool:
+                    if cand in seed.members or cand in assigned:
                         continue
-                    if _compatible_with_all(cand, group.members, compatible):
-                        group.members.add(cand)
+                    if _try_join(cand, seed, semantic_floor=floor):
                         grew = True
-            if len(group.members) >= min_size:
-                for member in group.members:
+            if len(seed.members) >= min_size:
+                for member in seed.members:
                     assigned.add(member)
-                group.representative_ref = _pick_medoid(group.members, sim, index)
-                groups.append(group)
+                groups.append(seed)
+            else:
+                for member in list(seed.members):
+                    assigned.discard(member)
             continue
 
-        # Attach singleton edge endpoint into existing group if fully compatible.
         if a in assigned and b not in assigned:
             host = next(g for g in groups if a in g.members)
-            if _compatible_with_all(b, host.members, compatible):
-                host.members.add(b)
-                assigned.add(b)
-                host.representative_ref = _pick_medoid(host.members, sim, index)
+            _try_join(b, host, semantic_floor=floor)
         elif b in assigned and a not in assigned:
             host = next(g for g in groups if b in g.members)
-            if _compatible_with_all(a, host.members, compatible):
-                host.members.add(a)
-                assigned.add(a)
-                host.representative_ref = _pick_medoid(host.members, sim, index)
+            _try_join(a, host, semantic_floor=floor)
 
-    # Drop undersized groups.
-    kept_groups: list[_MutableGroup] = []
+    kept: list[_MutableGroup] = []
     for group in groups:
         if len(group.members) < min_size:
             for member in group.members:
                 assigned.discard(member)
                 unassigned_reason.setdefault(member, "below_min_group_size")
             continue
-        kept_groups.append(group)
-    groups = kept_groups
+        _refresh(group)
+        kept.append(group)
+    groups = kept
     diag.primary_group_count = len(groups)
 
-    # Rescue pass for remaining non-ambiguous unassigned.
-    rescue_floor = float(settings.keyword_group_rescue_semantic_floor)
-    ambiguity_margin = float(settings.keyword_group_ambiguity_margin)
-    for ref in refs:
-        if ref in assigned:
-            continue
-        if unassigned_reason.get(ref) == "ambiguous_multiple_groups":
-            continue
-
+    # Rescue / assignment pass — dual-anchor nodes included here only.
+    pending = [ref for ref in refs if ref not in assigned]
+    for ref in pending:
         candidates: list[tuple[float, int, _MutableGroup]] = []
         for gi, group in enumerate(groups):
-            rep = group.representative_ref
-            cosine = _sim(sim, index, ref, rep)
-            if cosine < rescue_floor:
-                continue
-            evidence = pair_evidence(
-                texts_by_ref[ref],
-                texts_by_ref[rep],
+            result = evaluate_keyword_against_group(
+                ref=ref,
+                group=group,
+                texts_by_ref=texts_by_ref,
+                sim=sim,
+                index=index,
+                relations=relations,
+                semantic_floor=rescue_floor,
                 containment_min=containment_min,
             )
-            if evidence.conflict or not evidence.compatible:
+            if result.conflict:
                 continue
-            if not _compatible_with_all(ref, group.members, compatible):
-                # Soften: require compatibility with representative + >= half members
-                ok = 0
-                for member in group.members:
-                    key = (ref, member) if ref < member else (member, ref)
-                    if compatible.get(key, False) or (
-                        pair_evidence(
-                            texts_by_ref[ref],
-                            texts_by_ref[member],
-                            containment_min=containment_min,
-                        ).compatible
-                        and _sim(sim, index, ref, member) >= rescue_floor
-                    ):
-                        ok += 1
-                if ok < max(1, (len(group.members) + 1) // 2):
-                    continue
-            score = cosine
-            if evidence.shared_ngrams:
-                score += 0.1
-            candidates.append((score, gi, group))
+            if not result.accepted:
+                continue
+            candidates.append((result.score, gi, group))
 
         if not candidates:
-            # Classify reason
-            best_cos = max((_sim(sim, index, ref, other) for other in refs if other != ref), default=0.0)
+            best_cos = max(
+                (_sim(sim, index, ref, other) for other in refs if other != ref),
+                default=0.0,
+            )
             if best_cos < rescue_floor:
                 unassigned_reason.setdefault(ref, "below_semantic_floor")
-            elif any(
-                pair_evidence(
-                    texts_by_ref[ref],
-                    texts_by_ref[other],
-                    containment_min=containment_min,
-                ).conflict
-                for other in refs
-                if other != ref and _sim(sim, index, ref, other) >= rescue_floor
-            ):
-                unassigned_reason.setdefault(ref, "lexical_conflict")
             else:
-                unassigned_reason.setdefault(ref, "no_compatible_group")
+                # Only mark lexical_conflict if no group is lexically compatible.
+                any_group_lex = False
+                any_conflict_only = False
+                for group in groups:
+                    rep = group.representative_ref
+                    ev = pair_evidence(
+                        texts_by_ref[ref],
+                        texts_by_ref[rep],
+                        containment_min=containment_min,
+                    )
+                    anchors = group.anchor_ngrams
+                    shared = _member_ngrams(texts_by_ref[ref]) & anchors
+                    if (ev.compatible and not ev.conflict) or shared:
+                        any_group_lex = True
+                    if ev.conflict and not shared:
+                        any_conflict_only = True
+                if any_conflict_only and not any_group_lex:
+                    unassigned_reason.setdefault(ref, "lexical_conflict")
+                else:
+                    unassigned_reason.setdefault(ref, "no_compatible_group")
             continue
 
         candidates.sort(key=lambda row: (-row[0], row[1]))
         best_score, _best_gi, best_group = candidates[0]
-        if len(candidates) > 1:
+        if len(candidates) >= 2:
             second = candidates[1][0]
-            if abs(best_score - second) <= ambiguity_margin:
+            # Dual-anchor nodes that fit 2+ groups are always ambiguous:
+            # they contain both sides of a discovered conflict n-gram pair.
+            # Otherwise require a clear score gap.
+            if ref in dual_anchor or abs(best_score - second) <= ambiguity_margin:
                 unassigned_reason[ref] = "ambiguous_multiple_groups"
                 diag.ambiguous_count += 1
                 continue
-
-        best_group.members.add(ref)
-        assigned.add(ref)
-        best_group.representative_ref = _pick_medoid(best_group.members, sim, index)
-        unassigned_reason.pop(ref, None)
-        diag.rescue_assignment_count += 1
-
-    # Re-check bridges against formed groups (still ambiguous if 2+ fits).
-    for ref in list(bridges):
-        if ref in assigned:
-            continue
-        fits = 0
-        for group in groups:
-            cosine = _sim(sim, index, ref, group.representative_ref)
-            if cosine < rescue_floor:
-                continue
-            evidence = pair_evidence(
-                texts_by_ref[ref],
-                texts_by_ref[group.representative_ref],
-                containment_min=containment_min,
-            )
-            if evidence.compatible and not evidence.conflict:
-                fits += 1
-        if fits >= 2:
-            unassigned_reason[ref] = "ambiguous_multiple_groups"
-        elif fits == 0:
-            unassigned_reason.setdefault(ref, "no_compatible_group")
+        if _try_join(ref, best_group, semantic_floor=rescue_floor):
+            diag.rescue_assignment_count += 1
         else:
-            # Exactly one group — still prefer unassigned for known bridges unless
-            # clearly single-family; bridges stay unassigned by policy.
-            unassigned_reason[ref] = "ambiguous_multiple_groups"
+            unassigned_reason.setdefault(ref, "no_compatible_group")
 
-    # Materialize outputs.
+    # Materialize.
     out_groups: list[GroupOut] = []
     for index_g, group in enumerate(sorted(groups, key=lambda g: min(g.members)), start=1):
         rep = group.representative_ref or _pick_medoid(group.members, sim, index)
@@ -356,4 +499,10 @@ def run_hybrid_semantic_lexical_v1(
         unassigned.append(UnassignedOut(ref=ref, text=texts_by_ref[ref], reason=reason))
     unassigned.sort(key=lambda row: row.ref)
     out_groups.sort(key=lambda g: g.group_ref)
+
+    # Expose discovered anchors in algorithm_config (diagnostics only).
+    config["group_anchor_ngrams"] = {
+        g.group_ref: sorted(compute_group_anchors({m.ref for m in g.members}, texts_by_ref))
+        for g in out_groups
+    }
     return out_groups, unassigned, diag, config

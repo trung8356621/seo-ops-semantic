@@ -188,11 +188,13 @@ Values below were observed after a successful local `docker compose up -d --buil
 
 | Item | Observed |
 | --- | --- |
-| Image `seo-ops-semantic-semantic-api` | ~552 MB |
-| Image `pgvector/pgvector:0.8.0-pg16` | 622 MB |
-| Volume `seo-ops-semantic_model_cache` | ~252 MB (`/models` ≈ 241 MB after first download) |
-| Volume `seo-ops-semantic_postgres_data` | ~48 MB |
-| API container RAM after model load | ~889 MiB |
+| Image `seo-ops-semantic-semantic-api` | ~748 MB (post-scipy / average-linkage) |
+| Image `pgvector/pgvector:0.8.0-pg16` | ~622 MB |
+| Volume `seo-ops-semantic_model_cache` | ~252 MB |
+| Volume `seo-ops-semantic_postgres_data` | ~49 MB |
+| API container RAM idle (pre-model) | ~65 MiB |
+| API container RAM after `/health/ready` | ~640 MiB |
+| API peak during ~100–883 keyword analysis | ~888 MiB observed (below 1.2 GiB concern line) |
 | Postgres container RAM | ~37 MiB |
 
 Default API workers = **1** so the ONNX model is not duplicated across processes.

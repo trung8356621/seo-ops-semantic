@@ -17,6 +17,9 @@ from app.modules.keyword_grouping.contracts import (
     KeywordGroupAnalysisRequest,
     KeywordGroupAnalysisResponse,
     KeywordGroupDiagnostics,
+    KeywordGroupSearchHit,
+    KeywordGroupSearchRequest,
+    KeywordGroupSearchResponse,
     KeywordIn,
 )
 from app.modules.keyword_grouping.grouping import cluster_points, materialize_groups_with_scores
@@ -68,6 +71,53 @@ class KeywordGroupAnalyzer:
         self._embedding = embedding
         self._vectors = vectors
         self._repository = repository
+
+    def search(self, request: KeywordGroupSearchRequest) -> KeywordGroupSearchResponse:
+        """Rank candidate keywords by cosine similarity to the query.
+
+        No Group persistence. No Topic concepts. Reuses embedding cache.
+        """
+        query_text = normalize_text(request.query)
+        if query_text == "":
+            raise ValueError("query is empty after normalization")
+        prepared = self._prepare_keywords(request.keywords)
+        query_item = KeywordIn(ref="__query__", text=query_text)
+        embeddings, cache_stats = self._embed_keywords(
+            request.scope_ref,
+            [query_item, *prepared],
+        )
+        query_vec = np.asarray(embeddings[query_item.ref].vector, dtype=np.float64)
+        query_norm = float(np.linalg.norm(query_vec)) or 1.0
+        query_u = query_vec / query_norm
+
+        min_score = float(self._settings.topic_assignment_min_score)
+        scored: list[KeywordGroupSearchHit] = []
+        for item in prepared:
+            vec = np.asarray(embeddings[item.ref].vector, dtype=np.float64)
+            norm = float(np.linalg.norm(vec)) or 1.0
+            score = float(np.dot(query_u, vec / norm))
+            rounded = round(score, 6)
+            scored.append(
+                KeywordGroupSearchHit(
+                    ref=item.ref,
+                    text=item.text,
+                    similarity_score=rounded,
+                    accepted=rounded >= min_score,
+                )
+            )
+        scored.sort(key=lambda hit: (-hit.similarity_score, hit.ref))
+        hits = scored[: request.limit]
+
+        return KeywordGroupSearchResponse(
+            scope_ref=request.scope_ref,
+            query=query_text,
+            language=request.language,
+            hits=hits,
+            candidate_count=len(prepared),
+            embedding_cache=cache_stats,
+            acceptance_min_score=min_score,
+            request_id=request.request_id,
+        )
 
     def analyze(self, request: KeywordGroupAnalysisRequest) -> KeywordGroupAnalysisResponse:
         t0 = time.perf_counter()

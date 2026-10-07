@@ -7,10 +7,31 @@ from app.modules.keyword_grouping.analyzer import KeywordGroupAnalyzer
 from app.modules.keyword_grouping.contracts import (
     KeywordGroupAnalysisRequest,
     KeywordGroupAnalysisResponse,
+    KeywordGroupSearchRequest,
+    KeywordGroupSearchResponse,
 )
 from app.modules.keyword_grouping.repository import KeywordGroupAnalysisRepository
 
 router = APIRouter(prefix="/v1/keyword-groups", tags=["keyword-grouping"])
+
+
+@router.post("/search", response_model=KeywordGroupSearchResponse, status_code=status.HTTP_200_OK)
+def search_keywords(body: KeywordGroupSearchRequest, request: Request) -> KeywordGroupSearchResponse:
+    settings = request.app.state.settings
+    database = request.app.state.database
+    provider = request.app.state.embedding_provider
+
+    try:
+        with database.connection() as conn:
+            analyzer = KeywordGroupAnalyzer(
+                settings=settings,
+                embedding=provider,
+                vectors=PostgresVectorStore(conn),
+                repository=None,
+            )
+            return analyzer.search(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.post("/analyses", response_model=KeywordGroupAnalysisResponse, status_code=status.HTTP_200_OK)

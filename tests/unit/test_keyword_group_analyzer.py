@@ -16,7 +16,11 @@ from app.modules.keyword_grouping.analyzer import (
     grouping_namespace,
     model_cache_key,
 )
-from app.modules.keyword_grouping.contracts import KeywordGroupAnalysisRequest, KeywordIn
+from app.modules.keyword_grouping.contracts import (
+    KeywordGroupAnalysisRequest,
+    KeywordGroupSearchRequest,
+    KeywordIn,
+)
 
 
 class FakeEmbedding:
@@ -225,6 +229,58 @@ def test_embedding_cache_reused_under_keyword_group_namespace() -> None:
     assert cached is not None
     assert cached.content_hash == content_hash("balo học sinh")
     assert "topic:" not in grouping_namespace("site-9")
+
+
+def test_search_ranks_unassigned_candidates_by_similarity() -> None:
+    analyzer = KeywordGroupAnalyzer(settings=_settings(), embedding=FakeEmbedding())
+    result = analyzer.search(
+        KeywordGroupSearchRequest(
+            scope_ref="site-4",
+            query="balo quà tặng",
+            language="vi",
+            limit=2,
+            keywords=[
+                KeywordIn(ref="10", text="xưởng may balo quà tặng giá rẻ"),
+                KeywordIn(ref="11", text="cách giặt áo thun"),
+                KeywordIn(ref="12", text="balo quà tặng tại tphcm"),
+            ],
+        )
+    )
+    assert result.candidate_count == 3
+    assert len(result.hits) == 2
+    assert [hit.ref for hit in result.hits] == ["10", "12"]
+    assert result.hits[0].similarity_score >= result.hits[1].similarity_score
+    assert result.acceptance_min_score == 0.50
+    assert all(hit.accepted for hit in result.hits)
+
+
+def test_search_marks_nearest_neighbor_rejected_below_acceptance_floor() -> None:
+    """Nearest neighbor alone is not accepted; Python owns the threshold."""
+    analyzer = KeywordGroupAnalyzer(
+        settings=_settings(TOPIC_ASSIGNMENT_MIN_SCORE=0.99),
+        embedding=FakeEmbedding(),
+    )
+    result = analyzer.search(
+        KeywordGroupSearchRequest(
+            scope_ref="site-4",
+            query="balo quà tặng",
+            language="vi",
+            limit=3,
+            keywords=[
+                KeywordIn(ref="10", text="xưởng may balo quà tặng giá rẻ"),
+                KeywordIn(ref="11", text="cách giặt áo thun"),
+                KeywordIn(ref="12", text="balo quà tặng tại tphcm"),
+            ],
+        )
+    )
+    assert len(result.hits) == 3
+    assert result.hits[0].ref in {"10", "12"}
+    assert result.acceptance_min_score == 0.99
+    # FakeEmbedding puts laundry keywords far from balo — must be rejected.
+    laundry = next(hit for hit in result.hits if hit.ref == "11")
+    assert laundry.accepted is False
+    # High floor may also reject near balo neighbors; acceptance is score-gated.
+    assert any(not hit.accepted for hit in result.hits)
 
 
 def test_topic_endpoint_compat_analyzer_still_works() -> None:

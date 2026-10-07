@@ -100,3 +100,56 @@ class KeywordGroupAnalysisResponse(BaseModel):
     unassigned: list[UnassignedOut]
     diagnostics: KeywordGroupDiagnostics
     error: str | None = None
+
+
+class KeywordGroupSearchRequest(BaseModel):
+    """Rank supplied candidate keywords by cosine similarity to a query text."""
+
+    scope_ref: str = Field(min_length=1, max_length=128)
+    query: str = Field(min_length=1, max_length=2000)
+    keywords: list[KeywordIn] = Field(min_length=1)
+    language: str | None = Field(default=None, max_length=32)
+    limit: int = Field(default=20, ge=1, le=50)
+    request_id: str | None = None
+
+    @field_validator("scope_ref", "query")
+    @classmethod
+    def strip_required_search(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("must not be blank")
+        return stripped
+
+    @field_validator("language")
+    @classmethod
+    def language_strip_search(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def validate_unique_search_refs(self) -> KeywordGroupSearchRequest:
+        refs = [item.ref for item in self.keywords]
+        if len(refs) != len(set(refs)):
+            raise ValueError("duplicate keyword refs are not allowed")
+        return self
+
+
+class KeywordGroupSearchHit(BaseModel):
+    ref: str
+    text: str
+    similarity_score: float
+    # True when similarity meets topic_assignment_min_score (Python-owned gate).
+    accepted: bool
+
+
+class KeywordGroupSearchResponse(BaseModel):
+    scope_ref: str
+    query: str
+    language: str | None
+    hits: list[KeywordGroupSearchHit]
+    candidate_count: int
+    embedding_cache: dict[str, int]
+    acceptance_min_score: float | None = None
+    request_id: str | None = None

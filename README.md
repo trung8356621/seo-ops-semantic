@@ -18,8 +18,9 @@ Embedding runtime + PostgreSQL/pgvector
 | --- | --- |
 | `app/core/*` | Small reusable tools. No Topic/Keyword/Laravel knowledge. |
 | `app/modules/topic` | Topic analysis V1 (proposal only — not Laravel Topic authority). |
+| `app/modules/concept_matching` | Generic semantic concept matching (evidence/scores only). |
 | `app/storage` | Internal semantic tables + SQL migrations. |
-| `app/api` | Health + `POST/GET/DELETE /v1/topic/analyses`. No unrestricted `/embed`. |
+| `app/api` | Health + topic / keyword-groups / concept-matches analyses. No unrestricted `/embed`. |
 
 ## Topic analysis V1
 
@@ -47,6 +48,34 @@ Threshold semantics are non-redundant. Legacy `cosine_threshold_greedy_medoid_v1
 Disposable analysis tables: `topic_analysis_runs`, `topic_analysis_groups`, `topic_analysis_members`.
 
 Real-data note (site 4, 883 keywords): average-linkage @ 0.74 cuts the prior 260-member star hub; analysis remains proposal/evidence only.
+
+## Concept Matching
+
+Generic “is this text semantically similar to these examples?” evidence API.
+
+```bash
+curl.exe -s http://127.0.0.1:8088/v1/concept-matches/analyses `
+  -H "Content-Type: application/json" `
+  -d @concept_request.json
+```
+
+### What it can do
+
+- Embed entities + concept positive/negative examples with the shared multilingual ONNX model
+- Return cosine similarity evidence (`positive_max`, `positive_top_k_mean`, `negative_max`, `margin`, best examples)
+- Optionally evaluate a caller-supplied `decision_policy` → `suggested_match`
+
+### What it cannot do
+
+- Translation / LLM / research / sentence grammar classification
+- Mutate Laravel data, create tags, or decide Topic exclusion policy
+- Treat scores as probabilities or confidence percentages
+
+**Scores are cosine similarities, not probabilities.** No LLM / translation / research is performed.
+
+Positive examples are required (≥1). Negative examples are optional contrast signals. When `decision_policy` is omitted, `suggested_match` is `null`.
+
+V1 is **stateless** (`direct_embed_batch`); it does not write a concept-matching cache namespace and does not change Topic/Keyword Group embedding caches.
 
 ## Non-goals
 

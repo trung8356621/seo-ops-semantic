@@ -1,0 +1,31 @@
+{
+  "scope_ref": "site:4",
+  "language": "vi",
+  "entities": [
+    {"ref": "cta1", "text": "liên hệ ngay"},
+    {"ref": "cta2", "text": "nhận tư vấn ngay"},
+    {"ref": "cta3", "text": "click vào đây"},
+    {"ref": "cta4", "text": "đăng ký nhận báo giá"},
+    {"ref": "tx1", "text": "báo giá balo theo yêu cầu"},
+    {"ref": "tx2", "text": "giá may balo số lượng lớn"},
+    {"ref": "tx3", "text": "mua balo học sinh"}
+  ],
+  "concepts": [
+    {
+      "key": "system.cta_noise",
+      "positive_examples": [
+        "liên hệ ngay",
+        "nhận tư vấn ngay",
+        "click vào đây",
+        "đăng ký nhận báo giá",
+        "nhấn vào đây",
+        "xem thêm tại đây"
+      ],
+      "negative_examples": [
+        "báo giá balo theo yêu cầu",
+        "giá may balo số lượng lớn",
+        "mua balo học sinh"
+      ]
+    }
+  ]
+}

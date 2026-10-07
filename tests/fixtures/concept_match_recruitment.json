@@ -1,0 +1,30 @@
+{
+  "scope_ref": "site:4",
+  "language": "vi",
+  "entities": [
+    {"ref": "A", "text": "tuyển nhân viên may balo"},
+    {"ref": "B", "text": "việc làm thợ may túi xách"},
+    {"ref": "C", "text": "xưởng sản xuất balo theo yêu cầu"},
+    {"ref": "D", "text": "báo giá may balo số lượng lớn"}
+  ],
+  "concepts": [
+    {
+      "key": "custom.recruitment",
+      "positive_examples": [
+        "tuyển thợ may",
+        "việc làm xưởng may",
+        "tuyển nhân viên sản xuất",
+        "tuyển công nhân may"
+      ],
+      "negative_examples": [
+        "xưởng may balo",
+        "sản xuất balo theo yêu cầu",
+        "may balo số lượng lớn"
+      ]
+    }
+  ],
+  "decision_policy": {
+    "min_positive_score": 0.70,
+    "min_margin": 0.05
+  }
+}

@@ -74,6 +74,34 @@ class Settings(BaseSettings):
         alias="TOPIC_EMBEDDING_CACHE_ENABLED",
     )
 
+    # Keyword-group API strategy (independent of Topic /v1/topic/analyses).
+    keyword_group_algorithm: str = Field(
+        default="hybrid_semantic_lexical_v1",
+        alias="KEYWORD_GROUP_ALGORITHM",
+    )
+    # Semantic *candidate* floor — lexical guard still required for membership.
+    keyword_group_semantic_floor: float = Field(
+        default=0.55,
+        alias="KEYWORD_GROUP_SEMANTIC_FLOOR",
+    )
+    keyword_group_rescue_semantic_floor: float = Field(
+        default=0.50,
+        alias="KEYWORD_GROUP_RESCUE_SEMANTIC_FLOOR",
+    )
+    keyword_group_containment_min: float = Field(
+        default=0.67,
+        alias="KEYWORD_GROUP_CONTAINMENT_MIN",
+    )
+    keyword_group_min_group_size: int = Field(
+        default=2,
+        alias="KEYWORD_GROUP_MIN_GROUP_SIZE",
+    )
+    # Rescue: if top-2 group scores differ by <= margin → ambiguous.
+    keyword_group_ambiguity_margin: float = Field(
+        default=0.05,
+        alias="KEYWORD_GROUP_AMBIGUITY_MARGIN",
+    )
+
     @property
     def database_url(self) -> str:
         return (

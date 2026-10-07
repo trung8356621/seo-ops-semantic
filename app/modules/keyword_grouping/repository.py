@@ -1,22 +1,30 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
-from app.modules.topic.contracts import TopicAnalysisResponse
+from app.modules.keyword_grouping.contracts import KeywordGroupAnalysisResponse
+from app.modules.keyword_grouping.scoring import heuristic_confidence
 
 
-class TopicAnalysisRepository:
-    """Persist disposable Topic *analysis* runs (not business Topics)."""
+class KeywordGroupAnalysisRepository:
+    """Persist disposable keyword-group analysis runs.
+
+    Reuses existing ``topic_analysis_*`` tables (technical debt: Topic-named
+    storage). ``result_json`` is the source of truth for GET.
+    """
 
     def __init__(self, conn: Connection) -> None:
         self._conn = conn
 
-    def save(self, response: TopicAnalysisResponse) -> None:
+    def save(self, response: KeywordGroupAnalysisResponse) -> None:
         payload = response.model_dump()
+        now = datetime.now(timezone.utc)
+        # Column site_ref stores scope_ref until a dedicated schema exists.
         with self._conn.cursor() as cur:
             cur.execute(
                 """
@@ -41,27 +49,27 @@ class TopicAnalysisRepository:
                 """,
                 {
                     "analysis_id": response.analysis_id,
-                    "site_ref": response.site_ref,
+                    "site_ref": response.scope_ref,
                     "language": response.language,
                     "input_hash": response.input_hash,
                     "status": response.status,
                     "request_id": response.request_id,
-                    "model_provider": response.model.provider,
-                    "model_name": response.model.name,
-                    "model_version": response.model.version,
-                    "model_dimensions": response.model.dimensions,
+                    "model_provider": "n/a",
+                    "model_name": "n/a",
+                    "model_version": "n/a",
+                    "model_dimensions": 0,
                     "algorithm": response.diagnostics.algorithm,
                     "algorithm_config": Jsonb(response.diagnostics.algorithm_config),
                     "keyword_count": response.diagnostics.keyword_count,
                     "group_count": response.diagnostics.group_count,
                     "unassigned_count": response.diagnostics.unassigned_count,
-                    "singleton_count": response.diagnostics.singleton_count,
+                    "singleton_count": response.diagnostics.unassigned_count,
                     "diagnostics": Jsonb(response.diagnostics.model_dump()),
                     "result_json": Jsonb(payload),
                     "error": response.error,
-                    "started_at": response.started_at,
-                    "finished_at": response.finished_at,
-                    "duration_ms": response.duration_ms,
+                    "started_at": now,
+                    "finished_at": now,
+                    "duration_ms": response.diagnostics.timings_ms.get("total_ms", 0),
                 },
             )
 
@@ -88,7 +96,7 @@ class TopicAnalysisRepository:
                     {
                         "analysis_id": response.analysis_id,
                         "group_ref": group.group_ref,
-                        "suggested_label": group.suggested_label,
+                        "suggested_label": group.representative_text,
                         "member_count": group.member_count,
                         "mean_similarity": group.mean_similarity,
                         "min_similarity": group.min_similarity,
@@ -97,6 +105,8 @@ class TopicAnalysisRepository:
                     },
                 )
                 for member in group.members:
+                    # confidence column retained for schema compat; not exposed in API.
+                    conf = heuristic_confidence(member.similarity_score, 0.0)
                     cur.execute(
                         """
                         INSERT INTO topic_analysis_members (
@@ -110,16 +120,16 @@ class TopicAnalysisRepository:
                         {
                             "analysis_id": response.analysis_id,
                             "group_ref": group.group_ref,
-                            "keyword_ref": member.keyword_ref,
+                            "keyword_ref": member.ref,
                             "text": member.text,
                             "similarity_score": member.similarity_score,
-                            "confidence": member.confidence,
+                            "confidence": round(conf, 6),
                             "is_representative": member.is_representative,
                         },
                     )
         self._conn.commit()
 
-    def get(self, analysis_id: str) -> TopicAnalysisResponse | None:
+    def get(self, analysis_id: str) -> KeywordGroupAnalysisResponse | None:
         with self._conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT result_json FROM topic_analysis_runs WHERE analysis_id = %s",
@@ -129,12 +139,13 @@ class TopicAnalysisRepository:
         if row is None:
             return None
         payload: dict[str, Any] = row["result_json"]
-        # Keyword-group analyses share the table; do not surface them here.
-        if "site_ref" not in payload or "scope_ref" in payload:
+        # Reject Topic-shaped rows so GET stays contract-clean.
+        if "scope_ref" not in payload or "site_ref" in payload:
             return None
-        return TopicAnalysisResponse.model_validate(payload)
+        return KeywordGroupAnalysisResponse.model_validate(payload)
 
     def delete(self, analysis_id: str) -> bool:
+        # Only delete if this row is a keyword-group analysis.
         existing = self.get(analysis_id)
         if existing is None:
             return False

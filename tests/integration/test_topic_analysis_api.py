@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import os
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.api.app import create_app
+from app.config import Settings
+
+pytestmark = pytest.mark.integration
+
+
+def _settings(**overrides: object) -> Settings:
+    base = {
+        "POSTGRES_HOST": os.getenv("POSTGRES_HOST", "127.0.0.1"),
+        "POSTGRES_PORT": int(os.getenv("POSTGRES_PORT", "5433")),
+        "POSTGRES_DB": os.getenv("POSTGRES_DB", "semantic"),
+        "POSTGRES_USER": os.getenv("POSTGRES_USER", "semantic"),
+        "POSTGRES_PASSWORD": os.getenv("POSTGRES_PASSWORD", "semantic_local_change_me"),
+        "EMBEDDING_LAZY_LOAD": True,
+        "DB_CONNECT_RETRIES": 5,
+        "DB_CONNECT_RETRY_SECONDS": 1,
+        "TOPIC_CLUSTER_SIMILARITY_THRESHOLD": 0.70,
+        "TOPIC_MIN_MEMBER_SIMILARITY": 0.60,
+        "TOPIC_ASSIGNMENT_MIN_SCORE": 0.60,
+        "TOPIC_MIN_GROUP_SIZE": 2,
+        "MODEL_CACHE_DIR": os.getenv("MODEL_CACHE_DIR", ".models"),
+    }
+    base.update(overrides)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+@pytest.fixture(scope="module")
+def client() -> TestClient:
+    if os.getenv("SEMANTIC_INTEGRATION") != "1" and not os.getenv("POSTGRES_HOST"):
+        pytest.skip("integration DB not configured")
+    app = create_app(_settings())
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_post_get_delete_analysis(client: TestClient) -> None:
+    payload = {
+        "site_ref": "integration-6",
+        "language": "vi",
+        "keywords": [
+            {"ref": "kw-1", "text": "balo học sinh"},
+            {"ref": "kw-2", "text": "balo sinh viên"},
+            {"ref": "kw-3", "text": "balo laptop"},
+            {"ref": "kw-4", "text": "cách giặt áo thun"},
+            {"ref": "kw-5", "text": "giặt áo len"},
+            {"ref": "kw-6", "text": "túi xách da thật"},
+        ],
+    }
+    created = client.post("/v1/topic/analyses", json=payload)
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["status"] == "completed"
+    assert body["diagnostics"]["keyword_count"] == 6
+    assert "analysis_id" in body
+    assert body["model"]["dimensions"] > 0
+    analysis_id = body["analysis_id"]
+
+    fetched = client.get(f"/v1/topic/analyses/{analysis_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["analysis_id"] == analysis_id
+
+    deleted = client.delete(f"/v1/topic/analyses/{analysis_id}")
+    assert deleted.status_code == 204
+    missing = client.get(f"/v1/topic/analyses/{analysis_id}")
+    assert missing.status_code == 404
+
+
+def test_validation_error_on_duplicate_refs(client: TestClient) -> None:
+    payload = {
+        "site_ref": "integration-6",
+        "keywords": [
+            {"ref": "kw-1", "text": "balo"},
+            {"ref": "kw-1", "text": "túi"},
+        ],
+    }
+    response = client.post("/v1/topic/analyses", json=payload)
+    assert response.status_code == 422

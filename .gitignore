@@ -30,3 +30,9 @@ Thumbs.db
 # Docker override local secrets
 compose.override.yaml
 docker-compose.override.yml
+
+# Local benchmarks / private keyword datasets (never commit)
+tmp/
+artifacts/local/
+!artifacts/local/.gitkeep
+!tmp/.gitkeep

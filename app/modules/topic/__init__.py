@@ -1,5 +1,10 @@
-"""Placeholder package for future Topic analysis composition.
+"""Topic semantic analysis module (proposal only — not Laravel Topic authority)."""
 
-This module must NOT contain Topic persistence, Laravel ownership rules,
-locks, or clustering workflows yet.
-"""
+from app.modules.topic.analyzer import TopicAnalyzer
+from app.modules.topic.contracts import TopicAnalysisRequest, TopicAnalysisResponse
+
+__all__ = [
+    "TopicAnalyzer",
+    "TopicAnalysisRequest",
+    "TopicAnalysisResponse",
+]

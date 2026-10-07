@@ -17,17 +17,37 @@ Embedding runtime + PostgreSQL/pgvector
 | Layer | Role |
 | --- | --- |
 | `app/core/*` | Small reusable tools. No Topic/Keyword/Laravel knowledge. |
-| `app/modules/topic` | Placeholder only in this scaffold. |
+| `app/modules/topic` | Topic analysis V1 (proposal only — not Laravel Topic authority). |
 | `app/storage` | Internal semantic tables + SQL migrations. |
-| `app/api` | Health / diagnostics only. No production `/embed` API yet. |
+| `app/api` | Health + `POST/GET/DELETE /v1/topic/analyses`. No unrestricted `/embed`. |
 
-## Non-goals (this scaffold)
+## Topic analysis V1
 
-- Not Topic authority / clustering / proposal apply
+```bash
+# CLI
+docker compose exec semantic-api \
+  python -m app.modules.topic.cli analyze /app/tests/fixtures/topic_vi_keywords.json --persist
+
+# HTTP
+curl -s http://127.0.0.1:8088/v1/topic/analyses -H 'Content-Type: application/json' -d @request.json
+```
+
+Defaults (from Vietnamese fixture calibration):
+
+- `TOPIC_CLUSTER_SIMILARITY_THRESHOLD=0.70`
+- `TOPIC_MIN_MEMBER_SIMILARITY=0.62`
+- `TOPIC_ASSIGNMENT_MIN_SCORE=0.62`
+- algorithm: greedy medoid cosine-threshold (`cosine_threshold_greedy_medoid_v1`)
+
+Disposable analysis tables: `topic_analysis_runs`, `topic_analysis_groups`, `topic_analysis_members`.
+
+## Non-goals
+
+- Not Topic authority / Preview-Apply / Laravel mutation
 - Not Laravel business DB or mirrored Topic tables
 - Not Redis / Celery / workers
 - Not authentication
-- Not quality benchmarks or Topic thresholds
+- Not HNSW (not required at ~1k keywords)
 
 ## Stack
 
@@ -161,7 +181,7 @@ Values below were observed after a successful local `docker compose up -d --buil
 
 | Item | Observed |
 | --- | --- |
-| Image `seo-ops-semantic-semantic-api` | 551 MB |
+| Image `seo-ops-semantic-semantic-api` | ~552 MB |
 | Image `pgvector/pgvector:0.8.0-pg16` | 622 MB |
 | Volume `seo-ops-semantic_model_cache` | ~252 MB (`/models` ≈ 241 MB after first download) |
 | Volume `seo-ops-semantic_postgres_data` | ~48 MB |

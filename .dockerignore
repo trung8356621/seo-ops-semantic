@@ -15,5 +15,7 @@ models
 *.md
 !README.md
 tests
+!tests/fixtures
+!tests/fixtures/**
 .gitignore
 .dockerignore

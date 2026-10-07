@@ -15,6 +15,8 @@ RUN apt-get update \
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY scripts ./scripts
+COPY tests/fixtures ./tests/fixtures
 
 RUN pip install --upgrade pip \
     && pip install .

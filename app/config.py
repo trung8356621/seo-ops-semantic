@@ -38,6 +38,32 @@ class Settings(BaseSettings):
     db_connect_retry_seconds: float = Field(default=2.0, alias="DB_CONNECT_RETRY_SECONDS")
     embedding_lazy_load: bool = Field(default=True, alias="EMBEDDING_LAZY_LOAD")
 
+    # Topic analysis V1 — cosine threshold clustering (see docs / benchmark).
+    topic_cluster_similarity_threshold: float = Field(
+        default=0.70,
+        alias="TOPIC_CLUSTER_SIMILARITY_THRESHOLD",
+    )
+    topic_min_member_similarity: float = Field(
+        default=0.62,
+        alias="TOPIC_MIN_MEMBER_SIMILARITY",
+    )
+    topic_min_group_size: int = Field(default=2, alias="TOPIC_MIN_GROUP_SIZE")
+    topic_assignment_min_score: float = Field(
+        default=0.62,
+        alias="TOPIC_ASSIGNMENT_MIN_SCORE",
+    )
+    topic_low_confidence_score: float = Field(
+        default=0.35,
+        alias="TOPIC_LOW_CONFIDENCE_SCORE",
+        description="Heuristic confidence below this is flagged low-confidence (not probability).",
+    )
+    topic_max_keywords: int = Field(default=2000, alias="TOPIC_MAX_KEYWORDS")
+    topic_max_text_length: int = Field(default=500, alias="TOPIC_MAX_TEXT_LENGTH")
+    topic_embedding_cache_enabled: bool = Field(
+        default=True,
+        alias="TOPIC_EMBEDDING_CACHE_ENABLED",
+    )
+
     @property
     def database_url(self) -> str:
         return (

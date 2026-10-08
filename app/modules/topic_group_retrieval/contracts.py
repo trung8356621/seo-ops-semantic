@@ -26,7 +26,7 @@ class TopicGroupMatchPolicyIn(BaseModel):
 
 class TopicGroupMatchRequest(BaseModel):
     scope_ref: str = Field(min_length=1, max_length=128)
-    query: str = Field(min_length=1, max_length=4000)
+    query: str = Field(min_length=1, max_length=65536)
     language: str | None = None
     groups: list[TopicGroupCandidateIn] = Field(min_length=1)
     policy: TopicGroupMatchPolicyIn = Field(default_factory=TopicGroupMatchPolicyIn)
@@ -51,6 +51,8 @@ class TopicGroupEvidenceOut(BaseModel):
     lexical_matched: bool
     semantic_score: float | None = None
     best_example: str | None = None
+    best_segment: str | None = None
+    exact_name_matched: bool = False
 
 
 class TopicGroupMatchOut(BaseModel):

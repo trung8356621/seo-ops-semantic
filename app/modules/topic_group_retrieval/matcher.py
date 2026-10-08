@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Sequence
 
+import re
+
 from app.core.embedding.contracts import EmbeddingProvider
 from app.core.similarity.cosine import cosine_similarity
 from app.core.text.concept_lexical import matches_value
@@ -15,7 +17,19 @@ from app.modules.topic_group_retrieval.contracts import (
 )
 
 
-def segment_content(text: str, max_segments: int = 8) -> list[str]:
+def _is_cta_or_boilerplate(text: str) -> bool:
+    t = text.lower().strip()
+    if len(t) > 160:
+        return False
+    return bool(re.search(r"(hotline|email|gọi ngay|đặt lịch|liên hệ|inbox|nhận mẫu.*miễn phí|\b0\d{8,10}\b)", t))
+
+
+def _is_heading(text: str) -> bool:
+    t = text.strip()
+    return 15 <= len(t) <= 120 and not t.endswith((".", ":", "!", "?", ";", ","))
+
+
+def segment_content(text: str, max_segments: int = 12) -> list[str]:
     """Extract bounded meaningful segments from article content or short queries."""
     clean = text.strip()
     if not clean:
@@ -24,22 +38,39 @@ def segment_content(text: str, max_segments: int = 8) -> list[str]:
     if len(clean) <= 300 and clean.count("\n") <= 1:
         return [clean]
 
-    raw_lines = [p.strip() for p in clean.split("\n")]
-    meaningful = [p for p in raw_lines if len(p) >= 40]
-    if not meaningful:
-        meaningful = [p for p in raw_lines if len(p) >= 15]
-    if not meaningful:
-        return [clean[:1000]]
+    lines = [p.strip() for p in clean.split("\n") if p.strip()]
+    content_lines = [p for p in lines if not _is_cta_or_boilerplate(p)]
+    if not content_lines:
+        content_lines = lines
 
-    if len(meaningful) <= max_segments:
-        return meaningful
+    if len(content_lines) <= max_segments:
+        return content_lines
 
-    # Sample lead section + evenly distributed subsequent sections
-    first = meaningful[0]
-    rest = meaningful[1:]
-    step = len(rest) / (max_segments - 1)
-    sampled = [rest[int(i * step)] for i in range(max_segments - 1)]
-    return [first, *sampled]
+    # Priority:
+    # 1. Lead lines (first 2 content lines establish article context)
+    # 2. Section headings (structural topic signals)
+    # 3. Sample from remaining body lines across the text
+    lead = content_lines[:2]
+    rest = content_lines[2:]
+
+    headings = [p for p in rest if _is_heading(p)]
+    bodies = [p for p in rest if not _is_heading(p)]
+
+    selected = list(lead)
+    for h in headings:
+        if len(selected) < max_segments:
+            selected.append(h)
+
+    remaining_space = max_segments - len(selected)
+    if remaining_space > 0 and bodies:
+        if len(bodies) <= remaining_space:
+            selected.extend(bodies)
+        else:
+            step = len(bodies) / remaining_space
+            for i in range(remaining_space):
+                selected.append(bodies[int(i * step)])
+
+    return selected
 
 
 class TopicGroupMatcher:
@@ -47,7 +78,7 @@ class TopicGroupMatcher:
         self._embedding = embedding
 
     def match(self, request: TopicGroupMatchRequest) -> TopicGroupMatchResponse:
-        segments = segment_content(request.query, max_segments=8)
+        segments = segment_content(request.query, max_segments=12)
         if not segments or not request.groups:
             return TopicGroupMatchResponse(scope_ref=request.scope_ref, matches=[])
 
@@ -143,7 +174,7 @@ class TopicGroupMatcher:
             top1 = sorted_sims[0]
             half_k = max(1, len(sorted_sims) // 2)
             top_half_mean = sum(sorted_sims[:half_k]) / half_k
-            lead_sim = seg_sims[0]
+            lead_sim = max(seg_sims[:2]) if len(seg_sims) >= 2 else seg_sims[0]
             # Blend peak relevance, sustained topic coverage, and lead relevance
             sem_score = 0.45 * top1 + 0.35 * top_half_mean + 0.20 * lead_sim
 

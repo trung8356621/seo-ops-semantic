@@ -320,10 +320,22 @@ def test_case_a_article_9598() -> None:
 
 
 def test_segment_content_helper() -> None:
-    """Segment content splits long articles into bounded meaningful paragraphs."""
+    """Segment content splits long articles into bounded meaningful paragraphs and drops CTAs."""
     short_query = "balo học sinh"
     assert segment_content(short_query) == ["balo học sinh"]
 
     long_text = "\n\n".join([f"Đoạn văn thứ {i} với nội dung chi tiết mô tả quy trình sản xuất." for i in range(15)])
     segments = segment_content(long_text, max_segments=8)
     assert 1 < len(segments) <= 8
+
+    # CTA filtering check
+    mixed_text = (
+        "Đoạn mở đầu giới thiệu bài viết cặp học sinh.\n"
+        "📞Hotline tư vấn ngay: 0909 938 333| 📧Email:info.mayhopphat@gmail.com\n"
+        "🚀Nhận mẫu vải miễn phí tại xưởng! Gọi ngay 0909 938 333 để đặt lịch.\n"
+        "Đoạn kết luận về tiêu chuẩn chất lượng sản phẩm."
+    )
+    mixed_segs = segment_content(mixed_text, max_segments=10)
+    assert len(mixed_segs) == 2
+    assert "Hotline" not in mixed_segs[0] and "Hotline" not in mixed_segs[1]
+

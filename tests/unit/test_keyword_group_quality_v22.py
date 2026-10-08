@@ -52,9 +52,12 @@ def test_school_backpack_variations_stay_together() -> None:
 
 def test_broad_shared_anchor_does_not_chain_unrelated_phrases() -> None:
     frequent = frozenset({"túi xách"})
-    left = pair_evidence("các loại túi xách", "túi xách du lịch", frequent_ngrams=frequent)
     right = pair_evidence("túi xách du lịch", "túi xách quảng cáo", frequent_ngrams=frequent)
-    assert left.conflict and right.conflict
+    plain = pair_evidence("các loại túi xách", "túi xách du lịch")
+    marked = pair_evidence("các loại túi xách", "túi xách du lịch", frequent_ngrams=frequent)
+    assert plain.conflict == marked.conflict
+    assert plain.compatible == marked.compatible
+    assert right.conflict
     relation, _evidence = classify_pair_relation(
         text_a="túi xách du lịch",
         text_b="túi xách quảng cáo",

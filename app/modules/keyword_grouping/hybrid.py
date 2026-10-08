@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import Enum
@@ -9,11 +10,12 @@ import numpy as np
 
 from app.config import Settings
 from app.core.clustering import ClusterPoint
-from app.core.text.lexical import content_tokens, informative_ngrams, pair_evidence
+from app.core.text.lexical import _is_contiguous_span, content_tokens, informative_ngrams, pair_evidence
 from app.modules.keyword_grouping.contracts import GroupMemberOut, GroupOut, UnassignedOut
 from app.modules.keyword_grouping.scoring import cohesion_score
 
 ALGORITHM = "hybrid_semantic_lexical_v1"
+RECIPROCAL_NEIGHBOR_K = 3
 
 
 class PairRelation(str, Enum):
@@ -292,7 +294,7 @@ def run_hybrid_semantic_lexical_v1(
     settings: Settings,
     memberships_by_ref: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[list[GroupOut], list[UnassignedOut], HybridDiagnostics, dict[str, object]]:
-    """Hybrid V2.2: competing modifiers stay apart; anchors cannot override representative conflict."""
+    """V3: reciprocal semantic neighbors, pair-local lexical veto, locked representative."""
     memberships = memberships_by_ref or {}
     diag = HybridDiagnostics(
         industry_evidence_keyword_count=sum(1 for keys in memberships.values() if keys),
@@ -304,7 +306,9 @@ def run_hybrid_semantic_lexical_v1(
         "containment_min": settings.keyword_group_containment_min,
         "min_group_size": settings.keyword_group_min_group_size,
         "ambiguity_margin": settings.keyword_group_ambiguity_margin,
-        "version": "v2.2",
+        "version": "v3",
+        "reciprocal_neighbor_k": RECIPROCAL_NEIGHBOR_K,
+        "unknown_seed_rule": "not_a_seed",
         "industry_evidence": bool(memberships),
         "industry_evidence_keyword_count": diag.industry_evidence_keyword_count,
         "industry_membership_count": diag.industry_membership_count,
@@ -315,18 +319,16 @@ def run_hybrid_semantic_lexical_v1(
 
     refs, sim = _cosine_matrix(points)
     index = {ref: i for i, ref in enumerate(refs)}
-    frequent = _frequent_ngrams(texts_by_ref)
     floor = float(settings.keyword_group_semantic_floor)
     rescue_floor = float(settings.keyword_group_rescue_semantic_floor)
     containment_min = float(settings.keyword_group_containment_min)
     min_size = int(settings.keyword_group_min_group_size)
     ambiguity_margin = float(settings.keyword_group_ambiguity_margin)
 
+    pair_started = time.perf_counter()
     relations: dict[tuple[str, str], PairRelation] = {}
-    edge_score: dict[tuple[str, str], float] = {}
-    industry_tie: dict[tuple[str, str], int] = {}
+    containment_by_pair: dict[tuple[str, str], float] = {}
     industry_supported_edges: set[tuple[str, str]] = set()
-    neighbors: dict[str, set[str]] = {ref: set() for ref in refs}
 
     for i, a in enumerate(refs):
         for b in refs[i + 1 :]:
@@ -339,10 +341,10 @@ def run_hybrid_semantic_lexical_v1(
                 semantic_floor=floor,
                 containment_min=containment_min,
                 shared_industry=bool(shared_keys),
-                frequent_ngrams=frequent,
             )
             key = (a, b)
             relations[key] = rel
+            containment_by_pair[key] = float(getattr(evidence, "containment", 0.0))
             if rel is PairRelation.INCOMPATIBLE and cosine >= floor:
                 diag.lexical_reject_count += 1
                 continue
@@ -354,89 +356,138 @@ def run_hybrid_semantic_lexical_v1(
             if shared_keys and not lexical_compatible:
                 diag.industry_supported_edge_count += 1
                 industry_supported_edges.add(key)
-            shared = getattr(evidence, "shared_ngrams", frozenset())
-            containment = float(getattr(evidence, "containment", 0.0))
-            strength = cosine + (0.15 if shared else 0.0) + 0.05 * containment
-            edge_score[key] = strength
-            industry_tie[key] = len(shared_keys)
-            neighbors[a].add(b)
-            neighbors[b].add(a)
             diag.semantic_candidate_edges += 1
+    pair_seconds = time.perf_counter() - pair_started
 
-    conflict_ngram_pairs = _conflict_ngram_pairs_from_incompatible(
-        relations, texts_by_ref, containment_min, frequent
-    )
-    dual_anchor = {
-        ref for ref in refs if _is_dual_anchor_node(ref, texts_by_ref, conflict_ngram_pairs)
-    }
+    def _neighbors(min_cosine: float) -> dict[str, list[str]]:
+        ranked: dict[str, list[str]] = {}
+        for ref in refs:
+            row: list[tuple[float, str]] = []
+            for other in refs:
+                if other == ref:
+                    continue
+                cosine = _sim(sim, index, ref, other)
+                if cosine < min_cosine:
+                    continue
+                if relations[_pair_key(ref, other)] is PairRelation.INCOMPATIBLE:
+                    continue
+                row.append((cosine, other))
+            row.sort(key=lambda item: (-item[0], item[1]))
+            ranked[ref] = [other for _cosine, other in row[:RECIPROCAL_NEIGHBOR_K]]
+        return ranked
 
-    primary_pool = [ref for ref in refs if ref not in dual_anchor]
-    unassigned_reason: dict[str, str] = {}
-    assigned: set[str] = set()
-    groups: list[_MutableGroup] = []
+    def _reciprocal_seeds(pool: set[str], ranked: Mapping[str, list[str]]) -> list[tuple[float, str, str]]:
+        found: list[tuple[float, str, str]] = []
+        for left in sorted(pool):
+            for right in ranked.get(left, []):
+                if right not in pool or right <= left:
+                    continue
+                if left not in ranked.get(right, []):
+                    continue
+                key = _pair_key(left, right)
+                relation = relations[key]
+                if relation is not PairRelation.COMPATIBLE:
+                    continue
+                found.append((_sim(sim, index, left, right), left, right))
+        found.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return found
 
-    ranked_edges = sorted(
-        (
-            (score, industry_tie.get((a, b), 0), a, b)
-            for (a, b), score in edge_score.items()
-            if a in primary_pool and b in primary_pool
-        ),
-        key=lambda row: (-row[0], -row[1], row[2], row[3]),
-    )
+    def _span_link(ref: str, group: _MutableGroup) -> bool:
+        candidate = content_tokens(texts_by_ref[ref])
+        for member in group.members:
+            member_tokens = content_tokens(texts_by_ref[member])
+            if len(member_tokens) >= 3 and _is_contiguous_span(candidate, member_tokens):
+                return True
+            if len(candidate) >= 3 and _is_contiguous_span(member_tokens, candidate):
+                return True
+        return False
 
-    def _refresh(group: _MutableGroup) -> None:
-        group.representative_ref = _pick_medoid(group.members, sim, index)
-        group.anchor_ngrams = compute_group_anchors(group.members, texts_by_ref)
-
-    def _try_join(ref: str, group: _MutableGroup, *, semantic_floor: float) -> bool:
-        result = evaluate_keyword_against_group(
-            ref=ref,
-            group=group,
-            texts_by_ref=texts_by_ref,
-            sim=sim,
-            index=index,
-            relations=relations,
-            semantic_floor=semantic_floor,
+    def _coherent(ref: str, group: _MutableGroup, ranked: Mapping[str, list[str]], min_cosine: float) -> tuple[bool, bool]:
+        rep = group.representative_ref
+        if rep is None or ref in group.members:
+            return False, False
+        if _sim(sim, index, ref, rep) < min_cosine:
+            return False, False
+        key = _pair_key(ref, rep)
+        relation = relations[key]
+        evidence = pair_evidence(
+            texts_by_ref[ref],
+            texts_by_ref[rep],
             containment_min=containment_min,
-            frequent_ngrams=frequent,
         )
-        if not result.accepted or result.conflict:
-            return False
-        group.members.add(ref)
-        assigned.add(ref)
-        unassigned_reason.pop(ref, None)
-        _refresh(group)
-        return True
+        if relation is PairRelation.INCOMPATIBLE or evidence.conflict:
+            return False, True
+        if evidence.compatible or _span_link(ref, group):
+            return True, False
+        reciprocal = ref in ranked.get(rep, []) and rep in ranked.get(ref, [])
+        if relation is PairRelation.COMPATIBLE and reciprocal and containment_by_pair[key] >= containment_min:
+            return True, False
+        return False, False
 
-    for _score, _industry_tie, a, b in ranked_edges:
-        if a in assigned and b in assigned:
-            continue
-        if a not in assigned and b not in assigned:
-            seed = _MutableGroup(members={a, b})
-            _refresh(seed)
-            grew = True
-            while grew:
-                grew = False
-                for cand in primary_pool:
-                    if cand in seed.members or cand in assigned:
-                        continue
-                    if _try_join(cand, seed, semantic_floor=floor):
-                        grew = True
-            if len(seed.members) >= min_size:
-                for member in seed.members:
-                    assigned.add(member)
-                groups.append(seed)
-            else:
-                for member in list(seed.members):
-                    assigned.discard(member)
-            continue
+    seed_started = time.perf_counter()
+    assigned: set[str] = set()
+    ambiguous: set[str] = set()
+    unassigned_reason: dict[str, str] = {}
+    groups: list[_MutableGroup] = []
+    primary_seed_groups = 0
+    rescue_created_groups = 0
 
-        if a in assigned and b not in assigned:
-            host = next(g for g in groups if a in g.members)
-            _try_join(b, host, semantic_floor=floor)
-        elif b in assigned and a not in assigned:
-            host = next(g for g in groups if b in g.members)
-            _try_join(a, host, semantic_floor=floor)
+    def _open_seeds(pairs: list[tuple[float, str, str]], *, rescue: bool) -> None:
+        nonlocal primary_seed_groups, rescue_created_groups
+        opened = 0
+        for _cosine, left, right in pairs:
+            if left in assigned or right in assigned or left in ambiguous or right in ambiguous:
+                continue
+            group = _MutableGroup(members={left, right})
+            group.representative_ref = _pick_medoid({left, right}, sim, index)
+            group.anchor_ngrams = compute_group_anchors(group.members, texts_by_ref)
+            assigned.add(left)
+            assigned.add(right)
+            groups.append(group)
+            opened += 1
+            if _pair_key(left, right) in industry_supported_edges:
+                diag.industry_supported_assignment_count += 1
+        if rescue:
+            rescue_created_groups += opened
+        else:
+            primary_seed_groups += opened
+
+    primary_ranked = _neighbors(floor)
+    _open_seeds(_reciprocal_seeds(set(refs), primary_ranked), rescue=False)
+    seed_seconds = time.perf_counter() - seed_started
+
+    def _assign(ranked: Mapping[str, list[str]], min_cosine: float, *, rescue: bool) -> None:
+        pending = [ref for ref in refs if ref not in assigned and ref not in ambiguous]
+        for ref in pending:
+            hits = [group for group in groups if _coherent(ref, group, ranked, min_cosine)[0]]
+            if len(hits) > 1:
+                ambiguous.add(ref)
+                unassigned_reason[ref] = "ambiguous_multiple_groups"
+                diag.ambiguous_count += 1
+                continue
+            if len(hits) != 1:
+                continue
+            group = hits[0]
+            group.members.add(ref)
+            group.anchor_ngrams = compute_group_anchors(group.members, texts_by_ref)
+            assigned.add(ref)
+            if rescue:
+                diag.rescue_assignment_count += 1
+            rep = group.representative_ref or ref
+            if _pair_key(ref, rep) in industry_supported_edges:
+                diag.industry_supported_assignment_count += 1
+
+    growth_started = time.perf_counter()
+    _assign(primary_ranked, floor, rescue=False)
+    growth_seconds = time.perf_counter() - growth_started
+    diag.primary_group_count = len(groups)
+
+    rescue_started = time.perf_counter()
+    rescue_ranked = _neighbors(rescue_floor)
+    remaining = {ref for ref in refs if ref not in assigned and ref not in ambiguous}
+    _open_seeds(_reciprocal_seeds(remaining, rescue_ranked), rescue=True)
+    _assign(rescue_ranked, rescue_floor, rescue=True)
+    rescue_seconds = time.perf_counter() - rescue_started
 
     kept: list[_MutableGroup] = []
     for group in groups:
@@ -445,86 +496,41 @@ def run_hybrid_semantic_lexical_v1(
                 assigned.discard(member)
                 unassigned_reason.setdefault(member, "below_min_group_size")
             continue
-        _refresh(group)
         kept.append(group)
     groups = kept
-    diag.primary_group_count = len(groups)
 
-    # Rescue / assignment pass — dual-anchor nodes included here only.
-    pending = [ref for ref in refs if ref not in assigned]
-    for ref in pending:
-        candidates: list[tuple[float, int, _MutableGroup]] = []
-        for gi, group in enumerate(groups):
-            result = evaluate_keyword_against_group(
-                ref=ref,
-                group=group,
-                texts_by_ref=texts_by_ref,
-                sim=sim,
-                index=index,
-                relations=relations,
-                semantic_floor=rescue_floor,
-                containment_min=containment_min,
-                frequent_ngrams=frequent,
-            )
-            if result.conflict:
-                continue
-            if not result.accepted:
-                continue
-            candidates.append((result.score, gi, group))
-
-        if not candidates:
-            best_cos = max(
-                (_sim(sim, index, ref, other) for other in refs if other != ref),
-                default=0.0,
-            )
-            if best_cos < rescue_floor:
-                unassigned_reason.setdefault(ref, "below_semantic_floor")
-            else:
-                # Only mark lexical_conflict if no group is lexically compatible.
-                any_group_lex = False
-                any_conflict_only = False
-                for group in groups:
-                    rep = group.representative_ref
-                    ev = pair_evidence(
-                        texts_by_ref[ref],
-                        texts_by_ref[rep],
-                        containment_min=containment_min,
-                        frequent_ngrams=frequent,
-                    )
-                    anchors = group.anchor_ngrams
-                    shared = frozenset(
-                        ngram
-                        for ngram in (_member_ngrams(texts_by_ref[ref]) & anchors)
-                        if ngram not in frequent
-                    )
-                    if (ev.compatible and not ev.conflict) or shared:
-                        any_group_lex = True
-                    if ev.conflict and not shared:
-                        any_conflict_only = True
-                if any_conflict_only and not any_group_lex:
-                    unassigned_reason.setdefault(ref, "lexical_conflict")
-                else:
-                    unassigned_reason.setdefault(ref, "no_compatible_group")
+    for ref in refs:
+        if ref in assigned or ref in ambiguous:
             continue
-
-        candidates.sort(key=lambda row: (-row[0], row[1]))
-        best_score, _best_gi, best_group = candidates[0]
-        if len(candidates) >= 2:
-            second = candidates[1][0]
-            # Dual-anchor nodes that fit 2+ groups are always ambiguous:
-            # they contain both sides of a discovered conflict n-gram pair.
-            # Otherwise require a clear score gap.
-            if ref in dual_anchor or abs(best_score - second) <= ambiguity_margin:
-                unassigned_reason[ref] = "ambiguous_multiple_groups"
-                diag.ambiguous_count += 1
+        best = max((_sim(sim, index, ref, other) for other in refs if other != ref), default=0.0)
+        if best < rescue_floor:
+            unassigned_reason[ref] = "below_semantic_floor"
+            continue
+        saw_veto = False
+        saw_open = False
+        for other in refs:
+            if other == ref or _sim(sim, index, ref, other) < rescue_floor:
                 continue
-        support_key = _pair_key(ref, best_group.representative_ref)
-        if _try_join(ref, best_group, semantic_floor=rescue_floor):
-            diag.rescue_assignment_count += 1
-            if support_key in industry_supported_edges:
-                diag.industry_supported_assignment_count += 1
+            if relations[_pair_key(ref, other)] is PairRelation.INCOMPATIBLE:
+                saw_veto = True
+            else:
+                saw_open = True
+        if saw_veto and not saw_open:
+            unassigned_reason[ref] = "lexical_conflict"
         else:
-            unassigned_reason.setdefault(ref, "no_compatible_group")
+            unassigned_reason[ref] = "no_compatible_group"
+
+    config["reciprocal_seed_count"] = primary_seed_groups + rescue_created_groups
+    config["lexical_veto_count"] = diag.lexical_reject_count
+    config["rescue_created_group_count"] = rescue_created_groups
+    config["ambiguous_count"] = diag.ambiguous_count
+    config["timing_seconds"] = {
+        "pair_analysis": round(pair_seconds, 4),
+        "seed_selection": round(seed_seconds, 4),
+        "group_growth": round(growth_seconds, 4),
+        "rescue": round(rescue_seconds, 4),
+    }
+    _ = ambiguity_margin
 
     # Materialize.
     out_groups: list[GroupOut] = []

@@ -86,6 +86,13 @@ _FUNCTION_WORDS = frozenset(
 _TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
 
 
+def _is_contiguous_span(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    width = len(needle)
+    return any(haystack[index : index + width] == needle for index in range(len(haystack) - width + 1))
+
+
 def content_tokens(text: str) -> tuple[str, ...]:
     """Normalize → lowercase → word tokens → drop function words."""
     normalized = normalize_text(text).casefold()
@@ -145,33 +152,39 @@ def pair_evidence(
     exclusive_a = ngrams_a - ngrams_b
     exclusive_b = ngrams_b - ngrams_a
 
-    exclusive_unigrams_a = set_a - set_b
-    exclusive_unigrams_b = set_b - set_a
+    # Corpus frequency must not change this label. The argument stays for callers.
+    _ = frequent_ngrams
+    shorter, longer = (tokens_a, tokens_b) if len(tokens_a) <= len(tokens_b) else (tokens_b, tokens_a)
+    embedded = _is_contiguous_span(longer, shorter)
+    suffix_len = 0
+    for left, right in zip(reversed(tokens_a), reversed(tokens_b)):
+        if left != right:
+            break
+        suffix_len += 1
+    head_swap = suffix_len >= 2 and len(tokens_a) - suffix_len == 1 and len(tokens_b) - suffix_len == 1
     prefix_len = 0
     for left, right in zip(tokens_a, tokens_b):
         if left != right:
             break
         prefix_len += 1
-    competing_tail = (
+    tail_a = set(tokens_a[prefix_len:])
+    tail_b = set(tokens_b[prefix_len:])
+    short_substitution = (
         prefix_len >= 2
-        and prefix_len < len(tokens_a)
-        and prefix_len < len(tokens_b)
+        and 1 <= len(tail_a) <= 3
+        and 1 <= len(tail_b) <= 3
+        and not (tail_a & tail_b)
     )
-    distinctive = shared - (frequent_ngrams or frozenset())
-    boilerplate_only = bool(shared) and not distinctive
-    if shared and exclusive_unigrams_a and exclusive_unigrams_b and (competing_tail or boilerplate_only):
+    near_duplicate = abs(len(tokens_a) - len(tokens_b)) <= 2 and containment >= containment_min
+    if short_substitution:
         compatible = False
         conflict = True
-    elif shared:
+    elif embedded or head_swap or near_duplicate:
         compatible = True
         conflict = False
-    elif exclusive_a and exclusive_b:
-        # Distinct multi-token informative anchors on both sides → conflict.
+    elif exclusive_a and exclusive_b and not shared:
         compatible = False
         conflict = True
-    elif containment >= containment_min:
-        compatible = True
-        conflict = False
     else:
         compatible = False
         conflict = False

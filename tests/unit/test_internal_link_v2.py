@@ -75,3 +75,36 @@ def test_global_boundary_is_rejected() -> None:
                 "candidates": [],
             }
         )
+
+
+def test_repeated_sources_do_not_collapse_onto_one_target() -> None:
+    """Comparable relevance rotates the winner. A clear topical gap still beats inbound."""
+    profiles = [
+        {"fresh": 0.80, "mid": 0.78, "heavy": 0.77},
+        {"fresh": 0.74, "mid": 0.81, "heavy": 0.76},
+        {"fresh": 0.73, "mid": 0.75, "heavy": 0.90},
+        {"fresh": 0.82, "mid": 0.79, "heavy": 0.78},
+        {"fresh": 0.70, "mid": 0.84, "heavy": 0.71},
+        {"fresh": 0.76, "mid": 0.74, "heavy": 0.75},
+    ]
+    inbound = {"fresh": 0, "mid": 6, "heavy": 40}
+    first: list[str] = []
+    for index, scores in enumerate(profiles):
+        request = InternalLinkRankRequest(
+            source_ref=f"src-{index}",
+            candidate_boundary="topic_group",
+            limit=1,
+            candidates=[
+                _candidate(f"article:{name}", relevance=score, inbound_count=inbound[name])
+                for name, score in scores.items()
+            ],
+        )
+        once = rank_internal_links(request)
+        twice = rank_internal_links(request)
+        assert [item.ref for item in once.suggestions] == [item.ref for item in twice.suggestions]
+        first.append(once.suggestions[0].ref)
+
+    assert len(set(first)) >= 3
+    assert "article:heavy" in first
+    assert "article:fresh" in first
+    assert first[2] == "article:heavy"

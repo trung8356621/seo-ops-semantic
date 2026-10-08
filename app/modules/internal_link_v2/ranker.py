@@ -95,7 +95,9 @@ def _components(
     overuse_penalty = overuse_weight * overuse
     bonus = underlinked_bonus if candidate.inbound_count == 0 else 0.0
     repetition = repetition_penalty if already_selected else 0.0
-    final_score = candidate.relevance - overuse_penalty + bonus - repetition
+    # Relevance stays primary: distribution can nudge close scores, not invert a clear topical gap.
+    adjustment = max(-0.08, min(0.08, bonus - overuse_penalty - repetition))
+    final_score = candidate.relevance + adjustment
     return RankComponentOut(
         relevance=candidate.relevance,
         overuse_penalty=overuse_penalty,

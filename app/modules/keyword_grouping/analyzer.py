@@ -20,6 +20,7 @@ from app.modules.keyword_grouping.contracts import (
     KeywordGroupSearchHit,
     KeywordGroupSearchRequest,
     KeywordGroupSearchResponse,
+    IndustryEvidenceIn,
     KeywordIn,
 )
 from app.modules.keyword_grouping.grouping import cluster_points, materialize_groups_with_scores
@@ -31,14 +32,44 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def compute_input_hash(scope_ref: str, language: str | None, keywords: list[KeywordIn]) -> str:
+def compute_input_hash(
+    scope_ref: str,
+    language: str | None,
+    keywords: list[KeywordIn],
+    industry_evidence: list[IndustryEvidenceIn] | None = None,
+) -> str:
+    evidence_rows: list[dict[str, object]] = []
+    for item in industry_evidence or []:
+        memberships = sorted(
+            (
+                {"key": membership.key, "group_type": membership.group_type}
+                for membership in item.memberships
+            ),
+            key=lambda row: str(row["key"]),
+        )
+        if not memberships:
+            continue
+        evidence_rows.append({"ref": item.ref, "memberships": memberships})
+    evidence_rows.sort(key=lambda row: str(row["ref"]))
     payload = {
         "scope_ref": scope_ref,
         "language": language,
         "keywords": [{"ref": k.ref, "text": normalize_text(k.text)} for k in sorted(keywords, key=lambda x: x.ref)],
+        "industry_evidence": evidence_rows,
     }
     raw = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _memberships_by_ref(
+    evidence: list[IndustryEvidenceIn] | None,
+) -> dict[str, frozenset[str]]:
+    out: dict[str, frozenset[str]] = {}
+    for item in evidence or []:
+        keys = frozenset(membership.key for membership in item.memberships)
+        if keys:
+            out[item.ref] = keys
+    return out
 
 
 def content_hash(text: str) -> str:
@@ -127,6 +158,7 @@ class KeywordGroupAnalyzer:
             request.scope_ref,
             request.language,
             prepared,
+            request.industry_evidence,
         )
         if request.input_hash is not None and request.input_hash != "":
             if request.input_hash != computed_hash:
@@ -149,10 +181,12 @@ class KeywordGroupAnalyzer:
         algorithm = (self._settings.keyword_group_algorithm or "").strip().lower()
         hybrid_diag = None
         if algorithm in {"hybrid_semantic_lexical_v1", "hybrid_v1", "hybrid"}:
+            memberships = _memberships_by_ref(request.industry_evidence)
             groups, unassigned, hybrid_diag, algo_config = run_hybrid_semantic_lexical_v1(
                 points=points,
                 texts_by_ref=texts,
                 settings=self._settings,
+                memberships_by_ref=memberships,
             )
             algorithm_name = hybrid_diag.strategy
         else:
@@ -197,6 +231,18 @@ class KeywordGroupAnalyzer:
                     hybrid_diag.rescue_assignment_count if hybrid_diag else None
                 ),
                 ambiguous_count=hybrid_diag.ambiguous_count if hybrid_diag else None,
+                industry_evidence_keyword_count=(
+                    hybrid_diag.industry_evidence_keyword_count if hybrid_diag else None
+                ),
+                industry_membership_count=(
+                    hybrid_diag.industry_membership_count if hybrid_diag else None
+                ),
+                industry_supported_edge_count=(
+                    hybrid_diag.industry_supported_edge_count if hybrid_diag else None
+                ),
+                industry_supported_assignment_count=(
+                    hybrid_diag.industry_supported_assignment_count if hybrid_diag else None
+                ),
             ),
         )
 

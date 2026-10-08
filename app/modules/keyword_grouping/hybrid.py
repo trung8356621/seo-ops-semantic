@@ -30,6 +30,10 @@ class HybridDiagnostics:
     strategy: str = ALGORITHM
     semantic_candidate_edges: int = 0
     primary_group_count: int = 0
+    industry_evidence_keyword_count: int = 0
+    industry_membership_count: int = 0
+    industry_supported_edge_count: int = 0
+    industry_supported_assignment_count: int = 0
 
 
 @dataclass
@@ -73,12 +77,21 @@ def classify_pair_relation(
     cosine: float,
     semantic_floor: float,
     containment_min: float,
+    shared_industry: bool = False,
 ) -> tuple[PairRelation, object]:
-    """Three-state pair relation. Cosine alone never yields COMPATIBLE."""
+    """Three-state pair relation. Cosine alone never yields COMPATIBLE.
+
+    Shared Industry Group membership is positive support only.
+    It does not override lexical conflict or the semantic floor.
+    """
     evidence = pair_evidence(text_a, text_b, containment_min=containment_min)
     if evidence.conflict:
         return PairRelation.INCOMPATIBLE, evidence
-    if evidence.compatible and cosine >= semantic_floor:
+    if cosine < semantic_floor:
+        return PairRelation.UNKNOWN, evidence
+    if evidence.compatible:
+        return PairRelation.COMPATIBLE, evidence
+    if shared_industry:
         return PairRelation.COMPATIBLE, evidence
     return PairRelation.UNKNOWN, evidence
 
@@ -251,9 +264,14 @@ def run_hybrid_semantic_lexical_v1(
     points: Sequence[ClusterPoint],
     texts_by_ref: Mapping[str, str],
     settings: Settings,
+    memberships_by_ref: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[list[GroupOut], list[UnassignedOut], HybridDiagnostics, dict[str, object]]:
     """Hybrid V2.1: positive-edge graph + group anchors + post-group ambiguity."""
-    diag = HybridDiagnostics()
+    memberships = memberships_by_ref or {}
+    diag = HybridDiagnostics(
+        industry_evidence_keyword_count=sum(1 for keys in memberships.values() if keys),
+        industry_membership_count=sum(len(keys) for keys in memberships.values()),
+    )
     config = {
         "semantic_candidate_floor": settings.keyword_group_semantic_floor,
         "rescue_semantic_floor": settings.keyword_group_rescue_semantic_floor,
@@ -261,6 +279,9 @@ def run_hybrid_semantic_lexical_v1(
         "min_group_size": settings.keyword_group_min_group_size,
         "ambiguity_margin": settings.keyword_group_ambiguity_margin,
         "version": "v2.1",
+        "industry_evidence": bool(memberships),
+        "industry_evidence_keyword_count": diag.industry_evidence_keyword_count,
+        "industry_membership_count": diag.industry_membership_count,
     }
 
     if not points:
@@ -276,17 +297,21 @@ def run_hybrid_semantic_lexical_v1(
 
     relations: dict[tuple[str, str], PairRelation] = {}
     edge_score: dict[tuple[str, str], float] = {}
+    industry_tie: dict[tuple[str, str], int] = {}
+    industry_supported_edges: set[tuple[str, str]] = set()
     neighbors: dict[str, set[str]] = {ref: set() for ref in refs}
 
     for i, a in enumerate(refs):
         for b in refs[i + 1 :]:
             cosine = float(sim[i, index[b]])
+            shared_keys = memberships.get(a, frozenset()) & memberships.get(b, frozenset())
             rel, evidence = classify_pair_relation(
                 text_a=texts_by_ref[a],
                 text_b=texts_by_ref[b],
                 cosine=cosine,
                 semantic_floor=floor,
                 containment_min=containment_min,
+                shared_industry=bool(shared_keys),
             )
             key = (a, b)
             relations[key] = rel
@@ -295,11 +320,17 @@ def run_hybrid_semantic_lexical_v1(
                 continue
             if rel is not PairRelation.COMPATIBLE:
                 continue
-            # Positive edge only.
+            lexical_compatible = bool(getattr(evidence, "compatible", False)) and not bool(
+                getattr(evidence, "conflict", False)
+            )
+            if shared_keys and not lexical_compatible:
+                diag.industry_supported_edge_count += 1
+                industry_supported_edges.add(key)
             shared = getattr(evidence, "shared_ngrams", frozenset())
             containment = float(getattr(evidence, "containment", 0.0))
             strength = cosine + (0.15 if shared else 0.0) + 0.05 * containment
             edge_score[key] = strength
+            industry_tie[key] = len(shared_keys)
             neighbors[a].add(b)
             neighbors[b].add(a)
             diag.semantic_candidate_edges += 1
@@ -318,11 +349,11 @@ def run_hybrid_semantic_lexical_v1(
 
     ranked_edges = sorted(
         (
-            (score, a, b)
+            (score, industry_tie.get((a, b), 0), a, b)
             for (a, b), score in edge_score.items()
             if a in primary_pool and b in primary_pool
         ),
-        key=lambda row: (-row[0], row[1], row[2]),
+        key=lambda row: (-row[0], -row[1], row[2], row[3]),
     )
 
     def _refresh(group: _MutableGroup) -> None:
@@ -348,7 +379,7 @@ def run_hybrid_semantic_lexical_v1(
         _refresh(group)
         return True
 
-    for _score, a, b in ranked_edges:
+    for _score, _industry_tie, a, b in ranked_edges:
         if a in assigned and b in assigned:
             continue
         if a not in assigned and b not in assigned:
@@ -452,8 +483,11 @@ def run_hybrid_semantic_lexical_v1(
                 unassigned_reason[ref] = "ambiguous_multiple_groups"
                 diag.ambiguous_count += 1
                 continue
+        support_key = _pair_key(ref, best_group.representative_ref)
         if _try_join(ref, best_group, semantic_floor=rescue_floor):
             diag.rescue_assignment_count += 1
+            if support_key in industry_supported_edges:
+                diag.industry_supported_assignment_count += 1
         else:
             unassigned_reason.setdefault(ref, "no_compatible_group")
 

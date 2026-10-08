@@ -18,10 +18,39 @@ class KeywordIn(BaseModel):
         return stripped
 
 
+class IndustryMembershipIn(BaseModel):
+    """Accepted Industry Group membership. Not a score."""
+
+    key: str = Field(min_length=1, max_length=256)
+    group_type: str = Field(min_length=1, max_length=64)
+
+    @field_validator("key", "group_type")
+    @classmethod
+    def strip_membership(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("must not be blank")
+        return stripped
+
+
+class IndustryEvidenceIn(BaseModel):
+    ref: str = Field(min_length=1, max_length=128)
+    memberships: list[IndustryMembershipIn] = Field(default_factory=list)
+
+    @field_validator("ref")
+    @classmethod
+    def strip_ref(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("must not be blank")
+        return stripped
+
+
 class KeywordGroupAnalysisRequest(BaseModel):
     scope_ref: str = Field(min_length=1, max_length=128)
     language: str | None = Field(default=None, max_length=32)
     keywords: list[KeywordIn] = Field(min_length=1)
+    industry_evidence: list[IndustryEvidenceIn] | None = None
     input_hash: str | None = None
     request_id: str | None = None
 
@@ -46,6 +75,17 @@ class KeywordGroupAnalysisRequest(BaseModel):
         refs = [item.ref for item in self.keywords]
         if len(refs) != len(set(refs)):
             raise ValueError("duplicate keyword refs are not allowed")
+        keyword_refs = set(refs)
+        seen_refs: set[str] = set()
+        for item in self.industry_evidence or []:
+            if item.ref not in keyword_refs:
+                raise ValueError(f"industry evidence ref {item.ref} is not a submitted keyword")
+            if item.ref in seen_refs:
+                raise ValueError("duplicate industry evidence refs are not allowed")
+            seen_refs.add(item.ref)
+            keys = [membership.key for membership in item.memberships]
+            if len(keys) != len(set(keys)):
+                raise ValueError("duplicate industry membership keys are not allowed")
         return self
 
 
@@ -87,6 +127,10 @@ class KeywordGroupDiagnostics(BaseModel):
     lexical_reject_count: int | None = None
     rescue_assignment_count: int | None = None
     ambiguous_count: int | None = None
+    industry_evidence_keyword_count: int | None = None
+    industry_membership_count: int | None = None
+    industry_supported_edge_count: int | None = None
+    industry_supported_assignment_count: int | None = None
 
 
 class KeywordGroupAnalysisResponse(BaseModel):

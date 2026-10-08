@@ -65,3 +65,34 @@ def test_broad_shared_anchor_does_not_chain_unrelated_phrases() -> None:
         frequent_ngrams=frequent,
     )
     assert relation.value == "incompatible"
+
+
+def test_shuffled_input_is_deterministic() -> None:
+    texts = {
+        "a": "balo học sinh",
+        "b": "balo học sinh tiểu học",
+        "c": "vali kéo du lịch",
+        "d": "vali kéo",
+    }
+    vectors = {
+        "a": _unit([1.0, 0.0, 0, 0, 0, 0, 0, 0]),
+        "b": _unit([0.98, 0.02, 0, 0, 0, 0, 0, 0]),
+        "c": _unit([0.0, 1.0, 0, 0, 0, 0, 0, 0]),
+        "d": _unit([0.02, 0.98, 0, 0, 0, 0, 0, 0]),
+    }
+    order_a = ["a", "b", "c", "d"]
+    order_b = ["d", "b", "a", "c"]
+
+    def run(order: list[str]):
+        points = [ClusterPoint(ref=ref, vector=vectors[ref]) for ref in order]
+        groups, unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
+            points=points,
+            texts_by_ref=texts,
+            settings=_settings(),
+        )
+        return (
+            [frozenset(m.ref for m in group.members) for group in groups],
+            [u.ref for u in unassigned],
+        )
+
+    assert run(order_a) == run(order_b)

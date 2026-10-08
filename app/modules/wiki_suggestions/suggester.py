@@ -10,9 +10,15 @@ from app.modules.wiki_suggestions.contracts import (
     WikiSuggestionResponse,
     _ACRONYM,
 )
+from app.modules.wiki_suggestions.verified_cache import verified_for_language
+from app.modules.wiki_suggestions.wikipedia_lookup import Lookup
 
 
-def suggest_wiki_links(request: WikiSuggestionRequest) -> WikiSuggestionResponse:
+def suggest_wiki_links(
+    request: WikiSuggestionRequest,
+    lookup: Lookup | None = None,
+) -> WikiSuggestionResponse:
+    catalog = list(request.catalog) if request.catalog else verified_for_language(request.language)
     rejected: list[str] = []
     folded_content = fold_accents(request.content)
     for generic in GENERIC_TERMS:
@@ -21,7 +27,7 @@ def suggest_wiki_links(request: WikiSuggestionRequest) -> WikiSuggestionResponse
 
     found: list[WikiSuggestionOut] = []
     seen_refs: set[str] = set()
-    for concept in request.catalog:
+    for concept in catalog:
         term = _verified_term(request.content, concept, request.policy.min_semantic_score)
         if term is None:
             continue
@@ -46,8 +52,20 @@ def suggest_wiki_links(request: WikiSuggestionRequest) -> WikiSuggestionResponse
             continue
         if any(casefold_preserve_accents(item.term) == casefold_preserve_accents(acronym) for item in found):
             continue
-        if not any(_name_hit(acronym, concept) for concept in request.catalog):
-            rejected.append(acronym)
+        if not any(_name_hit(acronym, concept) for concept in catalog):
+            resolved = _lookup_url(acronym, request, lookup)
+            if resolved is None:
+                rejected.append(acronym)
+                continue
+            found.append(
+                WikiSuggestionOut(
+                    ref="wiki:"+acronym.casefold(),
+                    term=acronym,
+                    url=resolved,
+                    score=0.8,
+                    evidence="wikipedia_opensearch",
+                )
+            )
 
     found.sort(key=lambda item: item.score, reverse=True)
     return WikiSuggestionResponse(
@@ -55,6 +73,17 @@ def suggest_wiki_links(request: WikiSuggestionRequest) -> WikiSuggestionResponse
         suggestions=found[: request.policy.max_suggestions],
         rejected_terms=_unique(rejected),
     )
+
+
+def _lookup_url(term: str, request: WikiSuggestionRequest, lookup: Lookup | None) -> str | None:
+    if request.policy.lookup != "wikipedia" or lookup is None or _is_generic(term):
+        return None
+    found = lookup(term, request.language or "en")
+    if found is None:
+        return None
+    if not (found.startswith("https://en.wikipedia.org/wiki/") or found.startswith("https://vi.wikipedia.org/wiki/")):
+        return None
+    return found
 
 
 def _verified_term(content: str, concept: CanonicalConceptIn, min_semantic: float | None) -> str | None:

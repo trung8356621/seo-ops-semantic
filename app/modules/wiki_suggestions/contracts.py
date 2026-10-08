@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 GENERIC_TERMS = frozenset(
@@ -48,12 +50,14 @@ class CanonicalConceptIn(BaseModel):
 class WikiSuggestionPolicyIn(BaseModel):
     max_suggestions: int = Field(default=2, ge=1, le=2)
     min_semantic_score: float | None = Field(default=None, ge=-1.0, le=1.0)
+    lookup: Literal["cache", "wikipedia"] = "cache"
 
 
 class WikiSuggestionRequest(BaseModel):
     article_ref: str = Field(min_length=1, max_length=191)
     content: str = Field(min_length=1, max_length=20000)
-    catalog: list[CanonicalConceptIn] = Field(min_length=1)
+    language: str | None = Field(default=None, max_length=8)
+    catalog: list[CanonicalConceptIn] = Field(default_factory=list)
     policy: WikiSuggestionPolicyIn = Field(default_factory=WikiSuggestionPolicyIn)
 
     @field_validator("article_ref", "content")

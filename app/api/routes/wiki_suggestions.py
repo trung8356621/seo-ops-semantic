@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, status
 
 from app.modules.wiki_suggestions.contracts import WikiSuggestionRequest, WikiSuggestionResponse
 from app.modules.wiki_suggestions.suggester import suggest_wiki_links
+from app.modules.wiki_suggestions.wikipedia_lookup import wikipedia_opensearch
 
 router = APIRouter(prefix="/v1/wiki-suggestions", tags=["wiki-suggestions"])
 
@@ -11,6 +12,7 @@ router = APIRouter(prefix="/v1/wiki-suggestions", tags=["wiki-suggestions"])
 @router.post("", response_model=WikiSuggestionResponse)
 def create_wiki_suggestions(body: WikiSuggestionRequest) -> WikiSuggestionResponse:
     try:
-        return suggest_wiki_links(body)
+        lookup = wikipedia_opensearch if body.policy.lookup == "wikipedia" else None
+        return suggest_wiki_links(body, lookup)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

@@ -20,7 +20,8 @@ class InternalLinkCandidateIn(BaseModel):
     eligible: bool = False
     inbound_count: int = Field(default=0, ge=0)
     outbound_count: int = Field(default=0, ge=0)
-    relevance: float = Field(ge=0.0, le=1.0)
+    relevance: float = Field(default=0.0, ge=0.0, le=1.0)
+    representation: str = ""
     same_as_source: bool = False
     already_linked_from_source: bool = False
 
@@ -35,6 +36,7 @@ class InternalLinkCandidateIn(BaseModel):
 
 class InternalLinkRankRequest(BaseModel):
     source_ref: str = Field(min_length=1, max_length=191)
+    source_text: str = ""
     candidate_boundary: Literal["topic_group"]
     candidates: list[InternalLinkCandidateIn]
     limit: int = Field(default=5, ge=1, le=20)

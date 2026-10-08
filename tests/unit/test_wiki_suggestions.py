@@ -78,3 +78,36 @@ def test_unknown_acronym_is_not_invented() -> None:
     )
     assert "XYZ" in result.rejected_terms
     assert any(item.ref == "wiki:roi" for item in result.suggestions)
+
+
+def test_verified_cache_supplies_a_real_wikipedia_url() -> None:
+    result = suggest_wiki_links(
+        WikiSuggestionRequest(
+            article_ref="article:9",
+            content="Dây chuyền dùng RFID cho kho.",
+        )
+    )
+    assert result.suggestions
+    assert result.suggestions[0].url == "https://en.wikipedia.org/wiki/Radio-frequency_identification"
+    assert len(result.suggestions) <= 2
+
+
+def test_ambiguous_wikipedia_lookup_is_rejected() -> None:
+    def lookup(term: str, language: str) -> str | None:
+        del language
+        if term == "CAD":
+            return None
+        return "https://en.wikipedia.org/wiki/Polyester"
+
+    result = suggest_wiki_links(
+        WikiSuggestionRequest(
+            article_ref="article:9",
+            content="CAD và khách hàng.",
+            policy=WikiSuggestionPolicyIn(max_suggestions=2, lookup="wikipedia"),
+            catalog=[],
+        ),
+        lookup,
+    )
+    assert "CAD" in result.rejected_terms
+    assert all(item.term != "CAD" for item in result.suggestions)
+    assert all("khách hàng" not in item.term.casefold() for item in result.suggestions)

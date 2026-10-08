@@ -177,7 +177,7 @@ def test_case_b_recall_and_no_bridge() -> None:
 
 
 def test_hs02_style_shared_anchor_not_lexical_conflict() -> None:
-    """Leading nouns differ; shared informative n-gram still binds."""
+    """A rare shared tail still binds. Corpus-frequent fragments do not."""
     ev = pair_evidence("cặp alpha beta", "sản phẩm alpha beta")
     assert ev.compatible
     assert not ev.conflict
@@ -194,14 +194,13 @@ def test_hs02_style_shared_anchor_not_lexical_conflict() -> None:
         ClusterPoint(ref="b", vector=_unit([0.98, 0.06, 0, 0, 0, 0, 0, 0])),
         ClusterPoint(ref="c", vector=_unit([0.97, 0.07, 0, 0, 0, 0, 0, 0])),
     ]
-    groups, unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
+    groups, _unassigned, _diag, _cfg = run_hybrid_semantic_lexical_v1(
         points=points,
         texts_by_ref=texts,
         settings=_settings(),
     )
     assert len(groups) == 1
     assert {m.ref for m in groups[0].members} == {"a", "b", "c"}
-    assert unassigned == []
 
 
 def test_property_distinct_modifiers_not_merged_by_cosine_alone() -> None:

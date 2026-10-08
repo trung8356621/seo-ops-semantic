@@ -78,13 +78,19 @@ def classify_pair_relation(
     semantic_floor: float,
     containment_min: float,
     shared_industry: bool = False,
+    frequent_ngrams: frozenset[str] | None = None,
 ) -> tuple[PairRelation, object]:
     """Three-state pair relation. Cosine alone never yields COMPATIBLE.
 
     Shared Industry Group membership is positive support only.
     It does not override lexical conflict or the semantic floor.
     """
-    evidence = pair_evidence(text_a, text_b, containment_min=containment_min)
+    evidence = pair_evidence(
+        text_a,
+        text_b,
+        containment_min=containment_min,
+        frequent_ngrams=frequent_ngrams,
+    )
     if evidence.conflict:
         return PairRelation.INCOMPATIBLE, evidence
     if cosine < semantic_floor:
@@ -94,6 +100,19 @@ def classify_pair_relation(
     if shared_industry:
         return PairRelation.COMPATIBLE, evidence
     return PairRelation.UNKNOWN, evidence
+
+
+def _frequent_ngrams(texts_by_ref: Mapping[str, str]) -> frozenset[str]:
+    """N-grams in at least 10% of a large inventory are not compatibility evidence."""
+    count = len(texts_by_ref)
+    if count < 40:
+        return frozenset()
+    cutoff = max(8, (count + 9) // 10)
+    seen: dict[str, int] = {}
+    for text in texts_by_ref.values():
+        for ngram in _member_ngrams(text):
+            seen[ngram] = seen.get(ngram, 0) + 1
+    return frozenset(ngram for ngram, hits in seen.items() if hits >= cutoff)
 
 
 def _pick_medoid(members: set[str], sim: np.ndarray, index: dict[str, int]) -> str:
@@ -139,6 +158,7 @@ def _conflict_ngram_pairs_from_incompatible(
     relations: Mapping[tuple[str, str], PairRelation],
     texts_by_ref: Mapping[str, str],
     containment_min: float,
+    frequent_ngrams: frozenset[str] | None = None,
 ) -> frozenset[tuple[str, str]]:
     """Discover exclusive informative-ngram pairs from INCOMPATIBLE edges."""
     pairs: set[tuple[str, str]] = set()
@@ -149,6 +169,7 @@ def _conflict_ngram_pairs_from_incompatible(
             texts_by_ref[a],
             texts_by_ref[b],
             containment_min=containment_min,
+            frequent_ngrams=frequent_ngrams,
         )
         # Prefer length-2 exclusives as competing modifiers.
         ex_a = {ng for ng in evidence.exclusive_ngrams_a if len(ng.split()) == 2}
@@ -182,6 +203,7 @@ def evaluate_keyword_against_group(
     relations: Mapping[tuple[str, str], PairRelation],
     semantic_floor: float,
     containment_min: float,
+    frequent_ngrams: frozenset[str] | None = None,
 ) -> GroupCompatResult:
     """Group-level compatibility (not full pairwise clique)."""
     if not group.members:
@@ -194,18 +216,20 @@ def evaluate_keyword_against_group(
 
     anchors = group.anchor_ngrams or compute_group_anchors(group.members, texts_by_ref)
     cand_ngrams = _member_ngrams(texts_by_ref[ref])
-    shared_anchors = frozenset(cand_ngrams & anchors)
+    shared_anchors = frozenset(
+        ngram for ngram in (cand_ngrams & anchors) if ngram not in (frequent_ngrams or ())
+    )
 
     # Lexical vs representative.
     ev_rep = pair_evidence(
         texts_by_ref[ref],
         texts_by_ref[rep],
         containment_min=containment_min,
+        frequent_ngrams=frequent_ngrams,
     )
 
-    # Strong conflict: exclusive modifiers vs group and no shared group anchor.
-    if ev_rep.conflict and not shared_anchors:
-        # Confirm against a majority of members (one outlier must not veto).
+    # A shared anchor must not skip a conflict with the representative.
+    if ev_rep.conflict:
         conflict_hits = 0
         checked = 0
         for member in group.members:
@@ -214,8 +238,9 @@ def evaluate_keyword_against_group(
                 texts_by_ref[ref],
                 texts_by_ref[member],
                 containment_min=containment_min,
+                frequent_ngrams=frequent_ngrams,
             )
-            if ev.conflict and not (cand_ngrams & _member_ngrams(texts_by_ref[member])):
+            if ev.conflict:
                 conflict_hits += 1
         if checked > 0 and conflict_hits / checked >= 0.5:
             return GroupCompatResult(
@@ -236,6 +261,7 @@ def evaluate_keyword_against_group(
             texts_by_ref[ref],
             texts_by_ref[member],
             containment_min=containment_min,
+            frequent_ngrams=frequent_ngrams,
         )
         if ev.compatible and not ev.conflict:
             # Lexical OK; allow slightly softer semantic vs individual members.
@@ -266,7 +292,7 @@ def run_hybrid_semantic_lexical_v1(
     settings: Settings,
     memberships_by_ref: Mapping[str, frozenset[str]] | None = None,
 ) -> tuple[list[GroupOut], list[UnassignedOut], HybridDiagnostics, dict[str, object]]:
-    """Hybrid V2.1: positive-edge graph + group anchors + post-group ambiguity."""
+    """Hybrid V2.2: competing modifiers stay apart; anchors cannot override representative conflict."""
     memberships = memberships_by_ref or {}
     diag = HybridDiagnostics(
         industry_evidence_keyword_count=sum(1 for keys in memberships.values() if keys),
@@ -278,7 +304,7 @@ def run_hybrid_semantic_lexical_v1(
         "containment_min": settings.keyword_group_containment_min,
         "min_group_size": settings.keyword_group_min_group_size,
         "ambiguity_margin": settings.keyword_group_ambiguity_margin,
-        "version": "v2.1",
+        "version": "v2.2",
         "industry_evidence": bool(memberships),
         "industry_evidence_keyword_count": diag.industry_evidence_keyword_count,
         "industry_membership_count": diag.industry_membership_count,
@@ -289,6 +315,7 @@ def run_hybrid_semantic_lexical_v1(
 
     refs, sim = _cosine_matrix(points)
     index = {ref: i for i, ref in enumerate(refs)}
+    frequent = _frequent_ngrams(texts_by_ref)
     floor = float(settings.keyword_group_semantic_floor)
     rescue_floor = float(settings.keyword_group_rescue_semantic_floor)
     containment_min = float(settings.keyword_group_containment_min)
@@ -312,6 +339,7 @@ def run_hybrid_semantic_lexical_v1(
                 semantic_floor=floor,
                 containment_min=containment_min,
                 shared_industry=bool(shared_keys),
+                frequent_ngrams=frequent,
             )
             key = (a, b)
             relations[key] = rel
@@ -336,7 +364,7 @@ def run_hybrid_semantic_lexical_v1(
             diag.semantic_candidate_edges += 1
 
     conflict_ngram_pairs = _conflict_ngram_pairs_from_incompatible(
-        relations, texts_by_ref, containment_min
+        relations, texts_by_ref, containment_min, frequent
     )
     dual_anchor = {
         ref for ref in refs if _is_dual_anchor_node(ref, texts_by_ref, conflict_ngram_pairs)
@@ -370,6 +398,7 @@ def run_hybrid_semantic_lexical_v1(
             relations=relations,
             semantic_floor=semantic_floor,
             containment_min=containment_min,
+            frequent_ngrams=frequent,
         )
         if not result.accepted or result.conflict:
             return False
@@ -435,6 +464,7 @@ def run_hybrid_semantic_lexical_v1(
                 relations=relations,
                 semantic_floor=rescue_floor,
                 containment_min=containment_min,
+                frequent_ngrams=frequent,
             )
             if result.conflict:
                 continue
@@ -459,9 +489,14 @@ def run_hybrid_semantic_lexical_v1(
                         texts_by_ref[ref],
                         texts_by_ref[rep],
                         containment_min=containment_min,
+                        frequent_ngrams=frequent,
                     )
                     anchors = group.anchor_ngrams
-                    shared = _member_ngrams(texts_by_ref[ref]) & anchors
+                    shared = frozenset(
+                        ngram
+                        for ngram in (_member_ngrams(texts_by_ref[ref]) & anchors)
+                        if ngram not in frequent
+                    )
                     if (ev.compatible and not ev.conflict) or shared:
                         any_group_lex = True
                     if ev.conflict and not shared:

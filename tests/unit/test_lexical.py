@@ -23,10 +23,31 @@ def test_pair_compatible_same_modifier() -> None:
     assert "học sinh" in ev.shared_ngrams
 
 
-def test_pair_compatible_shared_modifier_different_product() -> None:
+def test_shared_ngram_does_not_hide_exclusive_unigrams() -> None:
+    ev = pair_evidence("balo đi học", "balo đi làm")
+    assert ev.conflict
+    assert not ev.compatible
+    assert "balo đi" in ev.shared_ngrams
+
+
+def test_single_head_swap_with_shared_tail_stays_compatible() -> None:
     ev = pair_evidence("cặp học sinh", "balo học sinh")
     assert ev.compatible
+    assert not ev.conflict
     assert "học sinh" in ev.shared_ngrams
+
+
+def test_frequent_shared_fragment_is_not_compatibility() -> None:
+    ev = pair_evidence(
+        "túi xách du lịch",
+        "túi xách quảng cáo",
+        frequent_ngrams=frozenset({"túi xách"}),
+    )
+    assert ev.conflict
+    assert not ev.compatible
+    ev = pair_evidence("balo học sinh", "balo học sinh tiểu học")
+    assert ev.compatible
+    assert not ev.conflict
 
 
 def test_pair_conflict_distinct_modifiers() -> None:

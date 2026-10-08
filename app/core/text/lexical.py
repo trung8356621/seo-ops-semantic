@@ -120,6 +120,7 @@ def pair_evidence(
     text_b: str,
     *,
     containment_min: float = 0.67,
+    frequent_ngrams: frozenset[str] | None = None,
 ) -> LexicalPairEvidence:
     """Deterministic lexical pair evidence (no domain phrase hard-coding)."""
     tokens_a = content_tokens(text_a)
@@ -144,7 +145,24 @@ def pair_evidence(
     exclusive_a = ngrams_a - ngrams_b
     exclusive_b = ngrams_b - ngrams_a
 
-    if shared:
+    exclusive_unigrams_a = set_a - set_b
+    exclusive_unigrams_b = set_b - set_a
+    prefix_len = 0
+    for left, right in zip(tokens_a, tokens_b):
+        if left != right:
+            break
+        prefix_len += 1
+    competing_tail = (
+        prefix_len >= 2
+        and prefix_len < len(tokens_a)
+        and prefix_len < len(tokens_b)
+    )
+    distinctive = shared - (frequent_ngrams or frozenset())
+    boilerplate_only = bool(shared) and not distinctive
+    if shared and exclusive_unigrams_a and exclusive_unigrams_b and (competing_tail or boilerplate_only):
+        compatible = False
+        conflict = True
+    elif shared:
         compatible = True
         conflict = False
     elif exclusive_a and exclusive_b:

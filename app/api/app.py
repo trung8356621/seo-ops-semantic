@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app import __version__
 from app.api.routes.concept_matches import router as concept_matches_router
+from app.api.routes.cta_plan import router as cta_plan_router
 from app.api.routes.health import router as health_router
 from app.api.routes.internal_links_v2 import router as internal_links_v2_router
 from app.api.routes.keyword_groups import router as keyword_groups_router
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(topic_groups_router)
     app.include_router(internal_links_v2_router)
     app.include_router(wiki_suggestions_router)
+    app.include_router(cta_plan_router)
 
     @app.get("/")
     def root() -> dict:
@@ -78,6 +80,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "topic_group_matches": "/v1/topic-groups/matches",
             "internal_link_v2_rank": "/v1/internal-links/v2/rank",
             "wiki_suggestions": "/v1/wiki-suggestions",
+            "cta_plan": "/v1/cta/plan",
         }
 
     return app

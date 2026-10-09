@@ -80,3 +80,53 @@ class ToolIntentMatchResponse(BaseModel):
     scope_ref: str
     matches: list[ToolIntentMatchOut]
     policy: ToolIntentPolicyIn
+
+
+class WeightedTargetIn(BaseModel):
+    ref: str = Field(min_length=1, max_length=191)
+    weight: float = Field(gt=0, le=100)
+
+
+class WeightedGroupIn(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    examples: list[str] = Field(min_length=1)
+    targets: list[WeightedTargetIn] = Field(min_length=1)
+    enabled: bool = True
+
+    @field_validator("examples")
+    @classmethod
+    def examples_strip(cls, value: list[str]) -> list[str]:
+        cleaned = [item.strip() for item in value if item.strip()]
+        if not cleaned:
+            raise ValueError("examples must not be blank")
+        return cleaned[:12]
+
+
+class WeightedMatchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    groups: list[WeightedGroupIn] = Field(min_length=1)
+    policy: ToolIntentPolicyIn = Field(default_factory=ToolIntentPolicyIn)
+
+    @field_validator("query")
+    @classmethod
+    def query_strip(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("query must not be blank")
+        return stripped
+
+
+class WeightedCandidateOut(BaseModel):
+    ref: str
+    semantic_relevance: float
+    weight: float
+    score: float
+    group_id: str
+    example: str
+
+
+class WeightedMatchResponse(BaseModel):
+    status: ToolIntentStatus
+    winner: str | None = None
+    candidates: list[WeightedCandidateOut]
+    policy: ToolIntentPolicyIn

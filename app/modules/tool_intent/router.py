@@ -15,7 +15,9 @@ from app.modules.concept_matching.contracts import (
     ConceptMatchAnalysisRequest,
     ConceptScoreOut,
 )
+from app.core.similarity.cosine import cosine_similarity
 from app.modules.tool_intent.catalog import TOOL_INTENT_NAMESPACE, builtin_intents
+from app.modules.tool_intent.weighted import WeightedGroup, WeightedTarget, group_relevance, rank_weighted
 from app.modules.tool_intent.contracts import (
     ToolIntentDefinitionIn,
     ToolIntentEvidenceOut,
@@ -24,6 +26,9 @@ from app.modules.tool_intent.contracts import (
     ToolIntentMatchResponse,
     ToolIntentPolicyIn,
     ToolIntentStatus,
+    WeightedCandidateOut,
+    WeightedMatchRequest,
+    WeightedMatchResponse,
 )
 
 
@@ -37,6 +42,7 @@ class _RankedIntent:
 
 class ToolIntentRouter:
     def __init__(self, embedding: EmbeddingProvider) -> None:
+        self._embedding = embedding
         self._analyzer = ConceptMatchAnalyzer(embedding)
 
     def match(self, request: ToolIntentMatchRequest) -> ToolIntentMatchResponse:
@@ -88,6 +94,59 @@ class ToolIntentRouter:
 
         rows = builtin_intents(request.allowed_keys)
         return [ToolIntentDefinitionIn.model_validate(row) for row in rows]
+
+    def match_weighted(self, request: WeightedMatchRequest) -> WeightedMatchResponse:
+        groups = [
+            WeightedGroup(
+                id=group.id,
+                examples=group.examples,
+                targets=[WeightedTarget(ref=target.ref, weight=target.weight) for target in group.targets],
+                enabled=group.enabled,
+            )
+            for group in request.groups
+            if group.enabled
+        ]
+        texts = [request.query]
+        spans: list[tuple[str, int, int]] = []
+        for group in groups:
+            start = len(texts)
+            texts.extend(group.examples)
+            spans.append((group.id, start, len(texts)))
+        if not self._embedding.is_loaded:
+            self._embedding.load()
+        vectors = [item.vector for item in self._embedding.embed_batch(texts)]
+        query_vector = vectors[0]
+        relevances: dict[str, float] = {}
+        examples: dict[str, str] = {}
+        group_by_id = {group.id: group for group in groups}
+        for group_id, start, end in spans:
+            sims = [cosine_similarity(query_vector, vectors[index]) for index in range(start, end)]
+            relevances[group_id] = group_relevance(sims)
+            best_index = max(range(len(sims)), key=lambda index: sims[index]) if sims else 0
+            examples[group_id] = group_by_id[group_id].examples[best_index] if sims else ""
+        status, winner, ranked = rank_weighted(
+            relevances,
+            examples,
+            groups,
+            floor=request.policy.min_positive_score,
+            margin=request.policy.min_margin,
+        )
+        return WeightedMatchResponse(
+            status=status,
+            winner=winner,
+            candidates=[
+                WeightedCandidateOut(
+                    ref=item.ref,
+                    semantic_relevance=item.semantic_relevance,
+                    weight=item.weight,
+                    score=item.score,
+                    group_id=item.group_id,
+                    example=item.example,
+                )
+                for item in ranked
+            ],
+            policy=request.policy,
+        )
 
 
 def _rank(score: ConceptScoreOut) -> _RankedIntent:

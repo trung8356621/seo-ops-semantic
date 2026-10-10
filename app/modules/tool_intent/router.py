@@ -6,6 +6,8 @@ Semantic evidence only. Callers decide execution.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
+import unicodedata
 
 from app.core.embedding.contracts import EmbeddingProvider
 from app.modules.concept_matching.analyzer import ConceptMatchAnalyzer
@@ -29,6 +31,10 @@ from app.modules.tool_intent.contracts import (
     WeightedCandidateOut,
     WeightedMatchRequest,
     WeightedMatchResponse,
+    HybridMatchRequest,
+    HybridMatchResponse,
+    HybridCandidateOut,
+    HybridOperationOut,
 )
 
 
@@ -147,6 +153,90 @@ class ToolIntentRouter:
             ],
             policy=request.policy,
         )
+
+    def match_hybrid(self, request: HybridMatchRequest) -> HybridMatchResponse:
+        global_groups = _weighted_groups(request.global_groups)
+        module_groups = {key: _weighted_groups(value) for key, value in request.modules.items()}
+        all_groups = [*global_groups, *[group for groups in module_groups.values() for group in groups]]
+        relevances, examples = self._embed_groups(request.query, all_groups)
+        _, _, global_ranked = rank_weighted(relevances, examples, global_groups, floor=-1.0, margin=0.0)
+        lexical = _lexical_evidence(request.query, request.lexical_hints, request.policy.lexical_ceiling)
+        candidates = []
+        for item in global_ranked:
+            bonus, matched = lexical.get(item.ref, (0.0, []))
+            if item.semantic_relevance < request.policy.min_semantic_candidate:
+                continue
+            candidates.append(HybridCandidateOut(
+                ref=item.ref, semantic_score=item.score, lexical_bonus=bonus,
+                combined_score=min(1.0, item.score + bonus), matched_lexical_groups=matched,
+                group_id=item.group_id, example=item.example,
+            ))
+        candidates.sort(key=lambda item: item.combined_score, reverse=True)
+        candidates = candidates[:request.policy.max_modules]
+        operations = []
+        for candidate in candidates:
+            groups = module_groups.get(candidate.ref, [])
+            _, _, ranked = rank_weighted(relevances, examples, groups, floor=-1.0, margin=0.0)
+            for item in ranked:
+                if item.semantic_relevance < request.policy.min_operation_score:
+                    continue
+                operations.append(HybridOperationOut(
+                    module=candidate.ref, operation=item.ref,
+                    global_combined_score=candidate.combined_score,
+                    internal_semantic_score=item.score,
+                    final_score=(request.policy.global_coefficient * candidate.combined_score)
+                    + (request.policy.internal_coefficient * item.score),
+                    group_id=item.group_id, example=item.example,
+                ))
+        operations.sort(key=lambda item: item.final_score, reverse=True)
+        if not operations:
+            reason = "no_supported_operation" if candidates else "no_relevant_module"
+            return HybridMatchResponse(status="unsupported" if candidates else "none", global_candidates=candidates,
+                operation_candidates=[], reason=reason, policy=request.policy)
+        if len(operations) > 1 and operations[0].final_score - operations[1].final_score < request.policy.final_margin:
+            return HybridMatchResponse(status="ambiguous", global_candidates=candidates,
+                operation_candidates=operations[:6], reason="final_operation_margin", policy=request.policy)
+        winner = operations[0]
+        return HybridMatchResponse(status="confident", module=winner.module, operation=winner.operation,
+            global_candidates=candidates, operation_candidates=operations[:6], reason="final_operation_selected", policy=request.policy)
+
+    def _embed_groups(self, query: str, groups: list[WeightedGroup]) -> tuple[dict[str, float], dict[str, str]]:
+        texts = [query]
+        spans = []
+        for group in groups:
+            start = len(texts); texts.extend(group.examples); spans.append((group, start, len(texts)))
+        if not self._embedding.is_loaded:
+            self._embedding.load()
+        vectors = [item.vector for item in self._embedding.embed_batch(texts)]
+        relevances, examples = {}, {}
+        for group, start, end in spans:
+            sims = [cosine_similarity(vectors[0], vectors[index]) for index in range(start, end)]
+            relevances[group.id] = group_relevance(sims)
+            examples[group.id] = group.examples[max(range(len(sims)), key=lambda index: sims[index])] if sims else ""
+        return relevances, examples
+
+
+def _weighted_groups(raw_groups) -> list[WeightedGroup]:
+    return [WeightedGroup(id=g.id, examples=g.examples,
+        targets=[WeightedTarget(ref=t.ref, weight=t.weight) for t in g.targets], enabled=g.enabled)
+        for g in raw_groups if g.enabled]
+
+
+def _normalise(text: str) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKC", text).casefold(), flags=re.UNICODE).split())
+
+
+def _lexical_evidence(query: str, hints, ceiling: float) -> dict[str, tuple[float, list[str]]]:
+    normalised = f" {_normalise(query)} "
+    by_module: dict[str, tuple[float, list[str]]] = {}
+    for hint in hints:
+        if not hint.enabled:
+            continue
+        if not any(f" {_normalise(phrase)} " in normalised for phrase in hint.phrases):
+            continue
+        score, groups = by_module.get(hint.module, (0.0, []))
+        by_module[hint.module] = (min(ceiling, score + hint.weight), [*groups, hint.id])
+    return by_module
 
 
 def _rank(score: ConceptScoreOut) -> _RankedIntent:

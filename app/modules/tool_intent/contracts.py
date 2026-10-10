@@ -10,7 +10,7 @@ from app.modules.tool_intent.catalog import (
     TOOL_INTENT_NAMESPACE,
 )
 
-ToolIntentStatus = Literal["confident", "ambiguous", "none"]
+ToolIntentStatus = Literal["confident", "ambiguous", "none", "unsupported"]
 
 
 class ToolIntentDefinitionIn(BaseModel):
@@ -130,3 +130,59 @@ class WeightedMatchResponse(BaseModel):
     winner: str | None = None
     candidates: list[WeightedCandidateOut]
     policy: ToolIntentPolicyIn
+
+
+class LexicalHintIn(BaseModel):
+    id: str = Field(min_length=1, max_length=80)
+    module: str = Field(min_length=1, max_length=191)
+    phrases: list[str] = Field(min_length=1, max_length=20)
+    weight: float = Field(gt=0, le=0.10)
+    enabled: bool = True
+
+
+class HybridPolicyIn(BaseModel):
+    min_semantic_candidate: float = Field(default=0.45, ge=-1.0, le=1.0)
+    min_operation_score: float = Field(default=DEFAULT_MIN_POSITIVE_SCORE, ge=-1.0, le=1.0)
+    final_margin: float = Field(default=DEFAULT_MIN_MARGIN, ge=0.0, le=2.0)
+    global_coefficient: float = Field(default=0.35, ge=0.0, le=1.0)
+    internal_coefficient: float = Field(default=0.65, ge=0.0, le=1.0)
+    lexical_ceiling: float = Field(default=0.10, ge=0.0, le=0.10)
+    max_modules: int = Field(default=3, ge=1, le=3)
+
+
+class HybridMatchRequest(BaseModel):
+    query: str = Field(min_length=1, max_length=4000)
+    global_groups: list[WeightedGroupIn] = Field(min_length=1)
+    modules: dict[str, list[WeightedGroupIn]]
+    lexical_hints: list[LexicalHintIn] = Field(default_factory=list)
+    policy: HybridPolicyIn = Field(default_factory=HybridPolicyIn)
+
+
+class HybridCandidateOut(BaseModel):
+    ref: str
+    semantic_score: float
+    lexical_bonus: float
+    combined_score: float
+    matched_lexical_groups: list[str] = Field(default_factory=list)
+    group_id: str
+    example: str
+
+
+class HybridOperationOut(BaseModel):
+    module: str
+    operation: str
+    global_combined_score: float
+    internal_semantic_score: float
+    final_score: float
+    group_id: str
+    example: str
+
+
+class HybridMatchResponse(BaseModel):
+    status: ToolIntentStatus
+    module: str | None = None
+    operation: str | None = None
+    global_candidates: list[HybridCandidateOut]
+    operation_candidates: list[HybridOperationOut]
+    reason: str
+    policy: HybridPolicyIn

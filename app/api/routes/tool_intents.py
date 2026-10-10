@@ -7,6 +7,8 @@ from app.modules.tool_intent.contracts import (
     ToolIntentMatchResponse,
     WeightedMatchRequest,
     WeightedMatchResponse,
+    HybridMatchRequest,
+    HybridMatchResponse,
 )
 from app.modules.tool_intent.router import ToolIntentRouter
 
@@ -31,5 +33,14 @@ def match_weighted_intent(body: WeightedMatchRequest, request: Request) -> Weigh
         if not provider.is_loaded:
             provider.load()
         return ToolIntentRouter(provider).match_weighted(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@router.post("/hybrid-match", response_model=HybridMatchResponse)
+def match_hybrid_intent(body: HybridMatchRequest, request: Request) -> HybridMatchResponse:
+    provider = request.app.state.embedding_provider
+    try:
+        return ToolIntentRouter(provider).match_hybrid(body)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc

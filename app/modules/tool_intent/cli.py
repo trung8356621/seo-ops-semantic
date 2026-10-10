@@ -11,6 +11,8 @@ from app.core.embedding.factory import create_embedding_provider
 from app.core.similarity.cosine import cosine_similarity
 from app.config import get_settings
 from app.modules.tool_intent.weighted import WeightedGroup, WeightedTarget, group_relevance, rank_weighted
+from app.modules.tool_intent.contracts import HybridMatchRequest
+from app.modules.tool_intent.router import ToolIntentRouter
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -33,6 +35,22 @@ def main(argv: list[str] | None = None) -> int:
             print("module scope requires --module", file=sys.stderr)
             return 2
         _print_level("internal", args.module, _rank(provider, args.question, document["modules"].get(args.module, [])))
+        return 0
+
+    if args.scope == "auto":
+        result = ToolIntentRouter(provider).match_hybrid(HybridMatchRequest.model_validate({
+            "query": args.question,
+            "global_groups": document.get("global", []),
+            "modules": document.get("modules", {}),
+            "lexical_hints": document.get("lexical_hints", []),
+            "policy": document.get("policy", {}),
+        }))
+        print(f"[hybrid] status={result.status} reason={result.reason}")
+        for item in result.global_candidates:
+            print(f"  module={item.ref} semantic={item.semantic_score:.3f} lexical={item.lexical_bonus:.3f} combined={item.combined_score:.3f} lexical_groups={','.join(item.matched_lexical_groups) or '-'}")
+        for item in result.operation_candidates:
+            print(f"  pair={item.module}/{item.operation} global={item.global_combined_score:.3f} internal={item.internal_semantic_score:.3f} final={item.final_score:.3f}")
+        _print_decision(result.module, result.operation, result.status)
         return 0
 
     global_result = _rank(provider, args.question, document.get("global", []))

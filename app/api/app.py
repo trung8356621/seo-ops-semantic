@@ -15,6 +15,7 @@ from app.api.routes.tool_intents import router as tool_intents_router
 from app.api.routes.topic import router as topic_router
 from app.api.routes.topic_groups import router as topic_groups_router
 from app.api.routes.wiki_suggestions import router as wiki_suggestions_router
+from app.api.routes.agent_routing_feedback import router as agent_routing_feedback_router
 from app.config import Settings, get_settings
 from app.core.embedding.contracts import EmbeddingProvider
 from app.core.embedding.factory import create_embedding_provider
@@ -65,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(internal_links_v2_router)
     app.include_router(wiki_suggestions_router)
     app.include_router(cta_plan_router)
+    app.include_router(agent_routing_feedback_router)
 
     @app.get("/")
     def root() -> dict:

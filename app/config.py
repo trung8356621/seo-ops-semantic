@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     db_connect_retries: int = Field(default=30, alias="DB_CONNECT_RETRIES")
     db_connect_retry_seconds: float = Field(default=2.0, alias="DB_CONNECT_RETRY_SECONDS")
     embedding_lazy_load: bool = Field(default=True, alias="EMBEDDING_LAZY_LOAD")
+    internal_api_token: str = Field(default="", alias="INTERNAL_API_TOKEN")
 
     # Topic clustering algorithm: average_linkage (default) | greedy_medoid_v2 | greedy_medoid_v1
     topic_cluster_algorithm: str = Field(

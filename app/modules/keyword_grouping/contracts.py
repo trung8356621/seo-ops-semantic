@@ -146,6 +146,45 @@ class KeywordGroupAnalysisResponse(BaseModel):
     error: str | None = None
 
 
+class KeywordGroupEmbeddingBatchRequest(BaseModel):
+    """Embed and cache one bounded keyword batch. Does not cluster."""
+
+    scope_ref: str = Field(min_length=1, max_length=128)
+    language: str | None = Field(default=None, max_length=32)
+    keywords: list[KeywordIn] = Field(min_length=1)
+    request_id: str | None = None
+
+    @field_validator("scope_ref")
+    @classmethod
+    def embedding_scope_strip(cls, value: str) -> str:
+        stripped = value.strip()
+        if stripped == "":
+            raise ValueError("scope_ref must not be blank")
+        return stripped
+
+    @field_validator("language")
+    @classmethod
+    def embedding_language_strip(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    @model_validator(mode="after")
+    def embedding_unique_refs(self) -> KeywordGroupEmbeddingBatchRequest:
+        refs = [item.ref for item in self.keywords]
+        if len(refs) != len(set(refs)):
+            raise ValueError("duplicate keyword refs are not allowed")
+        return self
+
+
+class KeywordGroupEmbeddingBatchResponse(BaseModel):
+    scope_ref: str
+    keyword_count: int
+    embedding_cache: dict[str, int]
+    request_id: str | None = None
+
+
 class KeywordGroupSearchRequest(BaseModel):
     """Rank supplied candidate keywords by cosine similarity to a query text."""
 

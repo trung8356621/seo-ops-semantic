@@ -18,6 +18,7 @@ from app.modules.keyword_grouping.analyzer import (
 )
 from app.modules.keyword_grouping.contracts import (
     KeywordGroupAnalysisRequest,
+    KeywordGroupEmbeddingBatchRequest,
     KeywordGroupSearchRequest,
     KeywordIn,
 )
@@ -305,3 +306,75 @@ def test_topic_endpoint_compat_analyzer_still_works() -> None:
     for group in result.groups:
         assert group.suggested_label
         assert "representative_text" not in group.model_dump()
+
+
+def test_embedding_batch_respects_topic_max_and_cache_clusters_across_batches() -> None:
+    store = MemoryVectorStore()
+    embedding = FakeEmbedding()
+    analyzer = KeywordGroupAnalyzer(
+        settings=_settings(TOPIC_MAX_KEYWORDS=2, KEYWORD_GROUP_CLUSTER_MAX_KEYWORDS=10),
+        embedding=embedding,
+        vectors=store,
+    )
+    analyzer.embed_batch(
+        KeywordGroupEmbeddingBatchRequest(
+            scope_ref="6",
+            keywords=[
+                KeywordIn(ref="1", text="balo học sinh"),
+                KeywordIn(ref="9", text="vali kéo du lịch"),
+            ],
+        )
+    )
+    analyzer.embed_batch(
+        KeywordGroupEmbeddingBatchRequest(
+            scope_ref="6",
+            keywords=[KeywordIn(ref="2", text="balo cho học sinh")],
+        )
+    )
+    calls_after_embed = embedding.calls
+    with pytest.raises(ValueError, match="TOPIC_MAX_KEYWORDS=2"):
+        analyzer.embed_batch(
+            KeywordGroupEmbeddingBatchRequest(
+                scope_ref="6",
+                keywords=[
+                    KeywordIn(ref="a", text="balo"),
+                    KeywordIn(ref="b", text="túi"),
+                    KeywordIn(ref="c", text="vali"),
+                ],
+            )
+        )
+
+    result = analyzer.analyze_from_cache(
+        KeywordGroupAnalysisRequest(
+            scope_ref="6",
+            language="vi",
+            keywords=[
+                KeywordIn(ref="1", text="balo học sinh"),
+                KeywordIn(ref="9", text="vali kéo du lịch"),
+                KeywordIn(ref="2", text="balo cho học sinh"),
+            ],
+        )
+    )
+    assert embedding.calls == calls_after_embed
+    assert result.diagnostics.embedding_cache == {"hits": 3, "misses": 0}
+    joined = next(group for group in result.groups if "1" in {m.ref for m in group.members})
+    assert {m.ref for m in joined.members} >= {"1", "2"}
+    assert "9" not in {m.ref for m in joined.members}
+
+
+def test_cluster_from_cache_refuses_missing_embeddings_without_partial_groups() -> None:
+    analyzer = KeywordGroupAnalyzer(
+        settings=_settings(),
+        embedding=FakeEmbedding(),
+        vectors=MemoryVectorStore(),
+    )
+    with pytest.raises(ValueError, match="embedding cache miss"):
+        analyzer.analyze_from_cache(
+            KeywordGroupAnalysisRequest(
+                scope_ref="6",
+                keywords=[
+                    KeywordIn(ref="1", text="balo học sinh"),
+                    KeywordIn(ref="2", text="balo cho học sinh"),
+                ],
+            )
+        )

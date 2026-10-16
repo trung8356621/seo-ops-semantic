@@ -17,6 +17,8 @@ from app.modules.keyword_grouping.contracts import (
     KeywordGroupAnalysisRequest,
     KeywordGroupAnalysisResponse,
     KeywordGroupDiagnostics,
+    KeywordGroupEmbeddingBatchRequest,
+    KeywordGroupEmbeddingBatchResponse,
     KeywordGroupSearchHit,
     KeywordGroupSearchRequest,
     KeywordGroupSearchResponse,
@@ -151,27 +153,97 @@ class KeywordGroupAnalyzer:
         )
 
     def analyze(self, request: KeywordGroupAnalysisRequest) -> KeywordGroupAnalysisResponse:
-        t0 = time.perf_counter()
-        analysis_id = str(uuid.uuid4())
         prepared = self._prepare_keywords(request.keywords)
+        self._assert_input_hash(request, prepared)
+        started = time.perf_counter()
+        embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared)
+        embed_ms = int((time.perf_counter() - started) * 1000)
+        return self._cluster(
+            request,
+            prepared,
+            embeddings,
+            cache_stats,
+            embed_ms,
+            started,
+        )
+
+    def embed_batch(
+        self,
+        request: KeywordGroupEmbeddingBatchRequest,
+    ) -> KeywordGroupEmbeddingBatchResponse:
+        """Cache embeddings for one request-sized batch. No grouping."""
+        prepared = self._prepare_keywords(request.keywords)
+        _embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared)
+        return KeywordGroupEmbeddingBatchResponse(
+            scope_ref=request.scope_ref,
+            keyword_count=len(prepared),
+            embedding_cache=cache_stats,
+            request_id=request.request_id,
+        )
+
+    def analyze_from_cache(
+        self,
+        request: KeywordGroupAnalysisRequest,
+    ) -> KeywordGroupAnalysisResponse:
+        """Cluster the full logical set from embeddings stored by embed_batch.
+
+        Uses the same hybrid/legacy grouping path as analyze(). Does not embed
+        missing vectors, so a partial cache cannot produce a partial grouping.
+        """
+        prepared = self._prepare_keywords(
+            request.keywords,
+            limit=self._settings.keyword_group_cluster_max_keywords,
+            limit_name="KEYWORD_GROUP_CLUSTER_MAX_KEYWORDS",
+        )
+        self._assert_input_hash(request, prepared)
+        started = time.perf_counter()
+        embeddings, cache_stats = self._embeddings_from_cache(request.scope_ref, prepared)
+        embed_ms = int((time.perf_counter() - started) * 1000)
+        return self._cluster(
+            request,
+            prepared,
+            embeddings,
+            cache_stats,
+            embed_ms,
+            started,
+        )
+
+    def _assert_input_hash(
+        self,
+        request: KeywordGroupAnalysisRequest,
+        prepared: list[KeywordIn],
+    ) -> None:
+        if request.input_hash is None or request.input_hash == "":
+            return
         computed_hash = compute_input_hash(
             request.scope_ref,
             request.language,
             prepared,
             request.industry_evidence,
         )
-        if request.input_hash is not None and request.input_hash != "":
-            if request.input_hash != computed_hash:
-                raise ValueError(
-                    "input_hash mismatch: client hash does not match canonical "
-                    "hash of normalized payload"
-                )
-        input_hash = computed_hash
+        if request.input_hash != computed_hash:
+            raise ValueError(
+                "input_hash mismatch: client hash does not match canonical "
+                "hash of normalized payload"
+            )
 
-        embed_t0 = time.perf_counter()
-        embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared)
-        embed_ms = int((time.perf_counter() - embed_t0) * 1000)
-
+    def _cluster(
+        self,
+        request: KeywordGroupAnalysisRequest,
+        prepared: list[KeywordIn],
+        embeddings: dict[str, EmbeddingResult],
+        cache_stats: dict[str, int],
+        embed_ms: int,
+        started: float,
+    ) -> KeywordGroupAnalysisResponse:
+        t0 = started
+        analysis_id = str(uuid.uuid4())
+        input_hash = compute_input_hash(
+            request.scope_ref,
+            request.language,
+            prepared,
+            request.industry_evidence,
+        )
         points = [
             ClusterPoint(ref=item.ref, vector=embeddings[item.ref].vector)
             for item in prepared
@@ -251,11 +323,17 @@ class KeywordGroupAnalyzer:
 
         return response
 
-    def _prepare_keywords(self, keywords: list[KeywordIn]) -> list[KeywordIn]:
-        if len(keywords) > self._settings.topic_max_keywords:
+    def _prepare_keywords(
+        self,
+        keywords: list[KeywordIn],
+        *,
+        limit: int | None = None,
+        limit_name: str = "TOPIC_MAX_KEYWORDS",
+    ) -> list[KeywordIn]:
+        max_count = self._settings.topic_max_keywords if limit is None else limit
+        if len(keywords) > max_count:
             raise ValueError(
-                f"keyword count {len(keywords)} exceeds TOPIC_MAX_KEYWORDS="
-                f"{self._settings.topic_max_keywords}"
+                f"keyword count {len(keywords)} exceeds {limit_name}={max_count}"
             )
         prepared: list[KeywordIn] = []
         for item in keywords:
@@ -328,6 +406,40 @@ class KeywordGroupAnalyzer:
                     )
 
         return results, {"hits": cache_hits, "misses": cache_misses}
+
+    def _embeddings_from_cache(
+        self,
+        scope_ref: str,
+        keywords: list[KeywordIn],
+    ) -> tuple[dict[str, EmbeddingResult], dict[str, int]]:
+        if not self._settings.topic_embedding_cache_enabled or self._vectors is None:
+            raise ValueError("embedding cache is required for keyword group clustering from cache")
+        namespace = grouping_namespace(scope_ref)
+        model_key = model_cache_key(self._embedding)
+        results: dict[str, EmbeddingResult] = {}
+        missing = 0
+        for item in keywords:
+            record = self._vectors.get(namespace, item.ref, model_key)
+            if (
+                record is None
+                or record.content_hash != content_hash(item.text)
+                or record.dimensions <= 0
+            ):
+                missing += 1
+                continue
+            results[item.ref] = EmbeddingResult(
+                vector=tuple(float(x) for x in record.embedding),
+                model_key=self._embedding.model_key,
+                model_version=self._embedding.model_version,
+                dimensions=record.dimensions,
+                provider=self._embedding.provider_key,
+            )
+        if missing:
+            raise ValueError(
+                f"embedding cache miss for {missing} of {len(keywords)} keywords; "
+                "submit embedding batches before clustering"
+            )
+        return results, {"hits": len(keywords), "misses": 0}
 
     def _scores_to_representative(
         self,

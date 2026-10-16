@@ -69,6 +69,11 @@ class Settings(BaseSettings):
         description="Heuristic confidence below this is flagged low-confidence (not probability).",
     )
     topic_max_keywords: int = Field(default=2000, alias="TOPIC_MAX_KEYWORDS")
+    # Cluster-from-cache only. Embed batches stay capped by TOPIC_MAX_KEYWORDS.
+    keyword_group_cluster_max_keywords: int = Field(
+        default=20000,
+        alias="KEYWORD_GROUP_CLUSTER_MAX_KEYWORDS",
+    )
     topic_max_text_length: int = Field(default=500, alias="TOPIC_MAX_TEXT_LENGTH")
     topic_embedding_cache_enabled: bool = Field(
         default=True,

@@ -77,6 +77,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "health": "/health",
             "topic_analyses": "/v1/topic/analyses",
             "keyword_group_analyses": "/v1/keyword-groups/analyses",
+            "keyword_group_embedding_batches": "/v1/keyword-groups/embedding-batches",
+            "keyword_group_analyses_from_cache": "/v1/keyword-groups/analyses/from-cache",
             "concept_match_analyses": "/v1/concept-matches/analyses",
             "tool_intent_match": "/v1/tool-intents/match",
             "topic_group_matches": "/v1/topic-groups/matches",

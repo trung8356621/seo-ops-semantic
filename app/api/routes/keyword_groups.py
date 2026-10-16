@@ -7,6 +7,8 @@ from app.modules.keyword_grouping.analyzer import KeywordGroupAnalyzer
 from app.modules.keyword_grouping.contracts import (
     KeywordGroupAnalysisRequest,
     KeywordGroupAnalysisResponse,
+    KeywordGroupEmbeddingBatchRequest,
+    KeywordGroupEmbeddingBatchResponse,
     KeywordGroupSearchRequest,
     KeywordGroupSearchResponse,
 )
@@ -34,6 +36,32 @@ def search_keywords(body: KeywordGroupSearchRequest, request: Request) -> Keywor
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
+@router.post(
+    "/embedding-batches",
+    response_model=KeywordGroupEmbeddingBatchResponse,
+    status_code=status.HTTP_200_OK,
+)
+def create_embedding_batch(
+    body: KeywordGroupEmbeddingBatchRequest,
+    request: Request,
+) -> KeywordGroupEmbeddingBatchResponse:
+    settings = request.app.state.settings
+    database = request.app.state.database
+    provider = request.app.state.embedding_provider
+
+    try:
+        with database.connection() as conn:
+            analyzer = KeywordGroupAnalyzer(
+                settings=settings,
+                embedding=provider,
+                vectors=PostgresVectorStore(conn),
+                repository=None,
+            )
+            return analyzer.embed_batch(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
 @router.post("/analyses", response_model=KeywordGroupAnalysisResponse, status_code=status.HTTP_200_OK)
 def create_analysis(body: KeywordGroupAnalysisRequest, request: Request) -> KeywordGroupAnalysisResponse:
     settings = request.app.state.settings
@@ -49,6 +77,32 @@ def create_analysis(body: KeywordGroupAnalysisRequest, request: Request) -> Keyw
                 repository=KeywordGroupAnalysisRepository(conn),
             )
             return analyzer.analyze(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+@router.post(
+    "/analyses/from-cache",
+    response_model=KeywordGroupAnalysisResponse,
+    status_code=status.HTTP_200_OK,
+)
+def create_analysis_from_cache(
+    body: KeywordGroupAnalysisRequest,
+    request: Request,
+) -> KeywordGroupAnalysisResponse:
+    settings = request.app.state.settings
+    database = request.app.state.database
+    provider = request.app.state.embedding_provider
+
+    try:
+        with database.connection() as conn:
+            analyzer = KeywordGroupAnalyzer(
+                settings=settings,
+                embedding=provider,
+                vectors=PostgresVectorStore(conn),
+                repository=KeywordGroupAnalysisRepository(conn),
+            )
+            return analyzer.analyze_from_cache(body)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 

@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import os
+import subprocess
+import sys
 import threading
+import time
 import uuid
 
 import pytest
@@ -180,6 +183,147 @@ def test_active_run_keeps_its_dataset_revision_when_a_newer_snapshot_commits(cli
     finished = client.get(f"/v1/keyword-groups/runs/{run_id}")
     assert finished.json()["status"] == "completed"
     assert finished.json()["dataset_revision"] == 1
+    _cleanup(scope)
+
+
+def test_create_run_language_matches_the_committed_dataset(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat dien", "may phat"])
+    matched = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    assert matched.status_code == 202, matched.text
+    assert matched.json()["status"] == "queued"
+    other = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "en"})
+    assert other.status_code == 404, other.text
+    _cleanup(scope)
+
+
+def test_two_processes_cannot_claim_the_same_run(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat dien", "may phat"])
+    created = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    assert created.status_code == 202, created.text
+    run_id = created.json()["run_id"]
+    script = (
+        "from app.modules.keyword_grouping.worker import process_available; "
+        "from app.storage.database import Database; from tests.integration.test_keyword_group_runs import HashEmbedding, _settings; "
+        "print(process_available(Database(_settings()), _settings(), HashEmbedding(), 'race'))"
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "/app"
+    first = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd="/app",
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd="/app",
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    out_a, err_a = first.communicate(timeout=60)
+    out_b, err_b = second.communicate(timeout=60)
+    assert first.returncode == 0, err_a.decode()
+    assert second.returncode == 0, err_b.decode()
+    results = {out_a.decode().strip(), out_b.decode().strip()}
+    assert results == {"True", "False"}
+    status = client.get(f"/v1/keyword-groups/runs/{run_id}")
+    assert status.json()["status"] == "completed"
+    members = _sql(
+        "SELECT COUNT(*) AS n FROM keyword_group_run_members WHERE run_id = %s",
+        (run_id,),
+        fetch=True,
+    )
+    assert int(members["n"]) == int(status.json()["member_count"])
+    _cleanup(scope)
+
+
+def test_heartbeat_advances_while_embedding_is_still_running(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat dien", "may phat"])
+    created = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    run_id = created.json()["run_id"]
+
+    class SlowEmbedding(HashEmbedding):
+        def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+            time.sleep(8)
+            return super().embed_batch(texts)
+
+    settings = _settings().model_copy(update={"keyword_group_run_heartbeat_seconds": 5})
+    worker = threading.Thread(
+        target=process_available,
+        args=(Database(settings), settings, SlowEmbedding(), "heartbeat"),
+    )
+    worker.start()
+    seen = False
+    for _ in range(40):
+        row = _sql(
+            "SELECT status, progress_phase, heartbeat_at FROM keyword_group_runs WHERE run_id = %s",
+            (run_id,),
+            fetch=True,
+        )
+        if row["status"] == "running" and row["heartbeat_at"] is not None:
+            seen = True
+            break
+        time.sleep(0.25)
+    worker.join(timeout=30)
+    assert seen is True
+    finished = client.get(f"/v1/keyword-groups/runs/{run_id}")
+    assert finished.json()["status"] == "completed"
+    _cleanup(scope)
+
+
+def test_failed_child_releases_the_advisory_lock_and_does_not_leave_the_run_running(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat dien"])
+    created = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    run_id = created.json()["run_id"]
+
+    class BoomEmbedding(HashEmbedding):
+        def embed_batch(self, texts: list[str]) -> list[EmbeddingResult]:
+            raise RuntimeError("child embed failed")
+
+    assert process_available(Database(_settings()), _settings(), BoomEmbedding(), "boom") is True
+    failed = client.get(f"/v1/keyword-groups/runs/{run_id}")
+    assert failed.json()["status"] == "failed"
+    assert "child embed failed" in failed.json()["error"]
+    locked = _sql("SELECT pg_try_advisory_lock(748201617) AS locked", (), fetch=True)
+    assert bool(locked["locked"]) is True
+    _sql("SELECT pg_advisory_unlock(748201617)", ())
+    assert process_available(Database(_settings()), _settings(), HashEmbedding(), "after-boom") is False
+    _cleanup(scope)
+
+
+def test_reprocessing_a_run_replaces_memberships(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat dien", "may phat"])
+    created = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    run_id = created.json()["run_id"]
+    assert process_available(Database(_settings()), _settings(), HashEmbedding(), "first") is True
+    first = _sql(
+        "SELECT COUNT(*) AS n FROM keyword_group_run_members WHERE run_id = %s",
+        (run_id,),
+        fetch=True,
+    )
+    _sql(
+        """
+        UPDATE keyword_group_runs
+        SET status = 'queued', progress_phase = 'requeued', finished_at = NULL, error = NULL
+        WHERE run_id = %s
+        """,
+        (run_id,),
+    )
+    assert process_available(Database(_settings()), _settings(), HashEmbedding(), "second") is True
+    second = _sql(
+        "SELECT COUNT(*) AS n FROM keyword_group_run_members WHERE run_id = %s",
+        (run_id,),
+        fetch=True,
+    )
+    assert int(second["n"]) == int(first["n"])
+    assert int(second["n"]) > 0
     _cleanup(scope)
 
 

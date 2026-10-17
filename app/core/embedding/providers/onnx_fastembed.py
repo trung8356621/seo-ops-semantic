@@ -56,6 +56,9 @@ class OnnxFastEmbedProvider:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    def release(self) -> None:
+        self._model = None
+
     def load(self) -> None:
         if self._model is not None:
             return

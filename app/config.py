@@ -107,6 +107,42 @@ class Settings(BaseSettings):
         default=0.05,
         alias="KEYWORD_GROUP_AMBIGUITY_MARGIN",
     )
+    keyword_group_dataset_batch_max: int = Field(
+        default=1000,
+        alias="KEYWORD_GROUP_DATASET_BATCH_MAX",
+    )
+    keyword_group_dataset_max_keywords: int = Field(
+        default=20000,
+        alias="KEYWORD_GROUP_DATASET_MAX_KEYWORDS",
+    )
+    keyword_group_dataset_staging_ttl_seconds: int = Field(
+        default=86400,
+        alias="KEYWORD_GROUP_DATASET_STAGING_TTL_SECONDS",
+    )
+    keyword_group_dataset_max_metadata_bytes: int = Field(
+        default=4096,
+        alias="KEYWORD_GROUP_DATASET_MAX_METADATA_BYTES",
+    )
+    keyword_group_dataset_max_evidence: int = Field(
+        default=32,
+        alias="KEYWORD_GROUP_DATASET_MAX_EVIDENCE",
+    )
+    keyword_group_run_heartbeat_seconds: int = Field(
+        default=15,
+        alias="KEYWORD_GROUP_RUN_HEARTBEAT_SECONDS",
+    )
+    keyword_group_run_stale_seconds: int = Field(
+        default=90,
+        alias="KEYWORD_GROUP_RUN_STALE_SECONDS",
+    )
+    keyword_group_run_max_attempts: int = Field(
+        default=2,
+        alias="KEYWORD_GROUP_RUN_MAX_ATTEMPTS",
+    )
+    keyword_group_run_poll_seconds: int = Field(
+        default=2,
+        alias="KEYWORD_GROUP_RUN_POLL_SECONDS",
+    )
 
     @property
     def database_url(self) -> str:

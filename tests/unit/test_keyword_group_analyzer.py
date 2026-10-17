@@ -9,6 +9,7 @@ from app.config import Settings
 from app.core.embedding.contracts import EmbeddingResult
 from app.core.text.normalization import normalize_text
 from app.core.vector.contracts import VectorRecord
+from app.modules.keyword_grouping.fingerprint import build_fingerprint
 from app.modules.keyword_grouping.analyzer import (
     KeywordGroupAnalyzer,
     content_hash,
@@ -227,6 +228,8 @@ def test_embedding_cache_reused_under_keyword_group_namespace() -> None:
 
     key = model_cache_key(embedding)
     cached = store.get(grouping_namespace("site-9"), "kw-1", key)
+    assert grouping_namespace("6", "en") == "keyword-group:6:en"
+    assert grouping_namespace("6", "vi") != grouping_namespace("6", "en")
     assert cached is not None
     assert cached.content_hash == content_hash("balo học sinh")
     assert "topic:" not in grouping_namespace("site-9")
@@ -378,3 +381,53 @@ def test_cluster_from_cache_refuses_missing_embeddings_without_partial_groups() 
                 ],
             )
         )
+
+
+def test_cached_cluster_does_not_load_embedding_model() -> None:
+    class GuardEmbedding(FakeEmbedding):
+        def load(self) -> None:
+            raise AssertionError("ONNX load")
+
+        def embed_batch(self, texts: Sequence[str]) -> list[EmbeddingResult]:
+            raise AssertionError("embed")
+
+    embedding = GuardEmbedding()
+    embedding._loaded = False
+    store = MemoryVectorStore()
+    keywords = [
+        KeywordIn(ref="1", text="balo học sinh"),
+        KeywordIn(ref="2", text="balo cho học sinh"),
+    ]
+    model_key = model_cache_key(embedding)
+    for item in keywords:
+        store.upsert(
+            VectorRecord(
+                namespace=grouping_namespace("6", "vi"),
+                entity_ref=item.ref,
+                content_hash=content_hash(item.text),
+                model_key=model_key,
+                embedding=(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                metadata={},
+                dimensions=8,
+            )
+        )
+    analyzer = KeywordGroupAnalyzer(settings=_settings(), embedding=embedding, vectors=store)
+    result = analyzer.analyze_from_cache(
+        KeywordGroupAnalysisRequest(scope_ref="6", language="vi", keywords=keywords)
+    )
+    assert embedding.is_loaded is False
+    assert result.diagnostics.embedding_cache == {"hits": 2, "misses": 0}
+    assert result.diagnostics.keyword_count == 2
+
+
+def test_fingerprint_distinguishes_site_language() -> None:
+    embedding = FakeEmbedding()
+    settings = _settings()
+    vi, vi_payload = build_fingerprint(settings, "abc", embedding, scope_ref="6", language="vi")
+    en, en_payload = build_fingerprint(settings, "abc", embedding, scope_ref="6", language="en")
+    other_site, _ = build_fingerprint(settings, "abc", embedding, scope_ref="7", language="vi")
+    assert vi != en
+    assert vi != other_site
+    assert vi_payload["language"] == "vi"
+    assert en_payload["scope_ref"] == "6"
+    assert vi_payload["semantic_floor"] == en_payload["semantic_floor"]

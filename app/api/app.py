@@ -79,6 +79,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "keyword_group_analyses": "/v1/keyword-groups/analyses",
             "keyword_group_embedding_batches": "/v1/keyword-groups/embedding-batches",
             "keyword_group_analyses_from_cache": "/v1/keyword-groups/analyses/from-cache",
+            "keyword_group_datasets": "/v1/keyword-groups/datasets/{scope_ref}",
+            "keyword_group_runs": "/v1/keyword-groups/runs",
             "concept_match_analyses": "/v1/concept-matches/analyses",
             "tool_intent_match": "/v1/tool-intents/match",
             "topic_group_matches": "/v1/topic-groups/matches",

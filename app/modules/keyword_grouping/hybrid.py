@@ -59,13 +59,28 @@ def _cosine_matrix(points: Sequence[ClusterPoint]) -> tuple[list[str], np.ndarra
     matrix = np.asarray([p.vector for p in ordered], dtype=np.float64)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     norms = np.where(norms == 0.0, 1.0, norms)
-    unit = matrix / norms
-    sim = np.clip(unit @ unit.T, -1.0, 1.0)
+    matrix /= norms
+    sim = matrix @ matrix.T
+    del matrix
+    np.clip(sim, -1.0, 1.0, out=sim)
     return refs, sim
 
 
 def _sim(sim: np.ndarray, index: dict[str, int], a: str, b: str) -> float:
     return float(sim[index[a], index[b]])
+
+
+_CODE_COMPATIBLE = 1
+_CODE_INCOMPATIBLE = 2
+
+
+def _relation(codes: np.ndarray, left: int, right: int) -> PairRelation:
+    code = int(codes[left, right])
+    if code == _CODE_COMPATIBLE:
+        return PairRelation.COMPATIBLE
+    if code == _CODE_INCOMPATIBLE:
+        return PairRelation.INCOMPATIBLE
+    return PairRelation.UNKNOWN
 
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
@@ -326,13 +341,20 @@ def run_hybrid_semantic_lexical_v1(
     ambiguity_margin = float(settings.keyword_group_ambiguity_margin)
 
     pair_started = time.perf_counter()
-    relations: dict[tuple[str, str], PairRelation] = {}
-    containment_by_pair: dict[tuple[str, str], float] = {}
+    # Pairs below every later lookup threshold are never read. Leaving them UNKNOWN
+    # matches the previous dict for every group, representative, and diagnostic count.
+    codes = np.zeros((len(refs), len(refs)), dtype=np.int8)
+    containment_by_pair: dict[tuple[int, int], float] = {}
     industry_supported_edges: set[tuple[str, str]] = set()
+    relation_cutoff = min(floor, rescue_floor)
 
     for i, a in enumerate(refs):
-        for b in refs[i + 1 :]:
-            cosine = float(sim[i, index[b]])
+        row = sim[i]
+        for j in range(i + 1, len(refs)):
+            cosine = float(row[j])
+            if cosine < relation_cutoff:
+                continue
+            b = refs[j]
             shared_keys = memberships.get(a, frozenset()) & memberships.get(b, frozenset())
             rel, evidence = classify_pair_relation(
                 text_a=texts_by_ref[a],
@@ -342,9 +364,13 @@ def run_hybrid_semantic_lexical_v1(
                 containment_min=containment_min,
                 shared_industry=bool(shared_keys),
             )
-            key = (a, b)
-            relations[key] = rel
-            containment_by_pair[key] = float(getattr(evidence, "containment", 0.0))
+            if rel is PairRelation.COMPATIBLE:
+                codes[i, j] = _CODE_COMPATIBLE
+                codes[j, i] = _CODE_COMPATIBLE
+                containment_by_pair[(i, j)] = float(getattr(evidence, "containment", 0.0))
+            elif rel is PairRelation.INCOMPATIBLE:
+                codes[i, j] = _CODE_INCOMPATIBLE
+                codes[j, i] = _CODE_INCOMPATIBLE
             if rel is PairRelation.INCOMPATIBLE and cosine >= floor:
                 diag.lexical_reject_count += 1
                 continue
@@ -355,7 +381,7 @@ def run_hybrid_semantic_lexical_v1(
             )
             if shared_keys and not lexical_compatible:
                 diag.industry_supported_edge_count += 1
-                industry_supported_edges.add(key)
+                industry_supported_edges.add((a, b))
             diag.semantic_candidate_edges += 1
     pair_seconds = time.perf_counter() - pair_started
 
@@ -369,7 +395,7 @@ def run_hybrid_semantic_lexical_v1(
                 cosine = _sim(sim, index, ref, other)
                 if cosine < min_cosine:
                     continue
-                if relations[_pair_key(ref, other)] is PairRelation.INCOMPATIBLE:
+                if _relation(codes, index[ref], index[other]) is PairRelation.INCOMPATIBLE:
                     continue
                 row.append((cosine, other))
             row.sort(key=lambda item: (-item[0], item[1]))
@@ -384,8 +410,7 @@ def run_hybrid_semantic_lexical_v1(
                     continue
                 if left not in ranked.get(right, []):
                     continue
-                key = _pair_key(left, right)
-                relation = relations[key]
+                relation = _relation(codes, index[left], index[right])
                 if relation is not PairRelation.COMPATIBLE:
                     continue
                 found.append((_sim(sim, index, left, right), left, right))
@@ -408,8 +433,9 @@ def run_hybrid_semantic_lexical_v1(
             return False, False
         if _sim(sim, index, ref, rep) < min_cosine:
             return False, False
-        key = _pair_key(ref, rep)
-        relation = relations[key]
+        left = index[ref]
+        right = index[rep]
+        relation = _relation(codes, left, right)
         evidence = pair_evidence(
             texts_by_ref[ref],
             texts_by_ref[rep],
@@ -420,7 +446,8 @@ def run_hybrid_semantic_lexical_v1(
         if evidence.compatible or _span_link(ref, group):
             return True, False
         reciprocal = ref in ranked.get(rep, []) and rep in ranked.get(ref, [])
-        if relation is PairRelation.COMPATIBLE and reciprocal and containment_by_pair[key] >= containment_min:
+        pair_index = (left, right) if left < right else (right, left)
+        if relation is PairRelation.COMPATIBLE and reciprocal and containment_by_pair[pair_index] >= containment_min:
             return True, False
         return False, False
 
@@ -511,7 +538,7 @@ def run_hybrid_semantic_lexical_v1(
         for other in refs:
             if other == ref or _sim(sim, index, ref, other) < rescue_floor:
                 continue
-            if relations[_pair_key(ref, other)] is PairRelation.INCOMPATIBLE:
+            if _relation(codes, index[ref], index[other]) is PairRelation.INCOMPATIBLE:
                 saw_veto = True
             else:
                 saw_open = True
@@ -519,6 +546,8 @@ def run_hybrid_semantic_lexical_v1(
             unassigned_reason[ref] = "lexical_conflict"
         else:
             unassigned_reason[ref] = "no_compatible_group"
+    del codes
+    del containment_by_pair
 
     config["reciprocal_seed_count"] = primary_seed_groups + rescue_created_groups
     config["lexical_veto_count"] = diag.lexical_reject_count

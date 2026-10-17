@@ -1,0 +1,117 @@
+[
+  {
+    "name": "two-keywords",
+    "scope_ref": "6",
+    "language": "vi",
+    "items": [
+      {
+        "ref": "2",
+        "text": "on ap",
+        "language": "vi",
+        "industry_evidence": [],
+        "metadata": {},
+        "content_hash": "f4104460a135d2ebf60113d95b32cc79c2aedb95ecff04b893b6a2481ac3e4bd"
+      },
+      {
+        "ref": "1",
+        "text": "may phat",
+        "language": "vi",
+        "industry_evidence": [],
+        "metadata": {},
+        "content_hash": "51ffc5d3e2f5ed8be2c44afdd23b5786aedd59c2bd0bce3622fa7114e7b433f3"
+      }
+    ],
+    "dataset_hash": "9854bc334a230b16aa2242bb3ee4d2f83f9332ee533b7f73b3678611ecc070e3"
+  },
+  {
+    "name": "whitespace-nfc",
+    "scope_ref": "6",
+    "language": "vi",
+    "items": [
+      {
+        "ref": "1",
+        "text": "  May   phat  ",
+        "language": "vi",
+        "industry_evidence": [],
+        "metadata": {},
+        "content_hash": "4669d2493dd3034be51d17c7a6384855333df28b48cb301eaeab405e8a281a7e"
+      }
+    ],
+    "dataset_hash": "4cd523bd04b0cc1703a44590b44a0c27307fb1caf4d1cceffe9aec8e2d2cbb94"
+  },
+  {
+    "name": "evidence-sort",
+    "scope_ref": "6",
+    "language": "vi",
+    "items": [
+      {
+        "ref": "1",
+        "text": "may phat",
+        "language": "vi",
+        "industry_evidence": [
+          {
+            "key": "b",
+            "group_type": "product"
+          },
+          {
+            "key": "a",
+            "group_type": "brand"
+          }
+        ],
+        "metadata": {},
+        "content_hash": "51ffc5d3e2f5ed8be2c44afdd23b5786aedd59c2bd0bce3622fa7114e7b433f3"
+      }
+    ],
+    "dataset_hash": "6db99d06b8300f951ad2aa355bf6246a61f1b10a305cdfbd41d5d9a7104ac634"
+  },
+  {
+    "name": "null-language",
+    "scope_ref": "6",
+    "language": null,
+    "items": [
+      {
+        "ref": "1",
+        "text": "may phat",
+        "language": null,
+        "industry_evidence": [],
+        "metadata": {},
+        "content_hash": "51ffc5d3e2f5ed8be2c44afdd23b5786aedd59c2bd0bce3622fa7114e7b433f3"
+      }
+    ],
+    "dataset_hash": "ee7d6712eb3449e64154c17ddf216949268c87080dc5e5afa5072c14097a001e"
+  },
+  {
+    "name": "metadata",
+    "scope_ref": "6",
+    "language": "vi",
+    "items": [
+      {
+        "ref": "1",
+        "text": "may phat",
+        "language": "vi",
+        "industry_evidence": [],
+        "metadata": {
+          "source": "inventory"
+        },
+        "content_hash": "51ffc5d3e2f5ed8be2c44afdd23b5786aedd59c2bd0bce3622fa7114e7b433f3"
+      }
+    ],
+    "dataset_hash": "c12d7f4af42df464079bb10d203f6de80c6fd7fb4293785cb475d63467a7cdca"
+  },
+  {
+    "name": "vietnamese",
+    "scope_ref": "6",
+    "language": "vi",
+    "items": [
+      {
+        "ref": "1",
+        "text": "  Máy   phát  ",
+        "language": "vi",
+        "industry_evidence": [],
+        "metadata": {},
+        "content_hash": "8407dfc818a1e20f719a90f9e5ec067772bcb135f325e1a7cec372c539f62fc6"
+      }
+    ],
+    "dataset_hash": "06662233cdf3b37922886e43984fddf3dacfc8cfdacc8d70ee1f2922dcce573d"
+  }
+]

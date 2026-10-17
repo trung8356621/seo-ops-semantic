@@ -78,8 +78,12 @@ def content_hash(text: str) -> str:
     return hashlib.sha256(normalize_text(text).encode("utf-8")).hexdigest()
 
 
-def grouping_namespace(scope_ref: str) -> str:
-    return f"keyword-group:{scope_ref}"
+def grouping_namespace(scope_ref: str, language: str | None = None) -> str:
+    base = f"keyword-group:{scope_ref}"
+    language = (language or "").strip()
+    if language == "":
+        return base
+    return f"{base}:{language}"
 
 
 def model_cache_key(provider: EmbeddingProvider) -> str:
@@ -118,6 +122,7 @@ class KeywordGroupAnalyzer:
         embeddings, cache_stats = self._embed_keywords(
             request.scope_ref,
             [query_item, *prepared],
+            request.language,
         )
         query_vec = np.asarray(embeddings[query_item.ref].vector, dtype=np.float64)
         query_norm = float(np.linalg.norm(query_vec)) or 1.0
@@ -156,7 +161,7 @@ class KeywordGroupAnalyzer:
         prepared = self._prepare_keywords(request.keywords)
         self._assert_input_hash(request, prepared)
         started = time.perf_counter()
-        embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared)
+        embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared, request.language)
         embed_ms = int((time.perf_counter() - started) * 1000)
         return self._cluster(
             request,
@@ -173,7 +178,7 @@ class KeywordGroupAnalyzer:
     ) -> KeywordGroupEmbeddingBatchResponse:
         """Cache embeddings for one request-sized batch. No grouping."""
         prepared = self._prepare_keywords(request.keywords)
-        _embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared)
+        _embeddings, cache_stats = self._embed_keywords(request.scope_ref, prepared, request.language)
         return KeywordGroupEmbeddingBatchResponse(
             scope_ref=request.scope_ref,
             keyword_count=len(prepared),
@@ -197,7 +202,7 @@ class KeywordGroupAnalyzer:
         )
         self._assert_input_hash(request, prepared)
         started = time.perf_counter()
-        embeddings, cache_stats = self._embeddings_from_cache(request.scope_ref, prepared)
+        embeddings, cache_stats = self._embeddings_from_cache(request.scope_ref, prepared, request.language)
         embed_ms = int((time.perf_counter() - started) * 1000)
         return self._cluster(
             request,
@@ -249,6 +254,7 @@ class KeywordGroupAnalyzer:
             for item in prepared
         ]
         texts = {item.ref: normalize_text(item.text) for item in prepared}
+        embeddings.clear()
         cluster_t0 = time.perf_counter()
         algorithm = (self._settings.keyword_group_algorithm or "").strip().lower()
         hybrid_diag = None
@@ -260,6 +266,7 @@ class KeywordGroupAnalyzer:
                 settings=self._settings,
                 memberships_by_ref=memberships,
             )
+            del points
             algorithm_name = hybrid_diag.strategy
         else:
             # Escape hatch: legacy cosine clustering for keyword-groups.
@@ -352,8 +359,9 @@ class KeywordGroupAnalyzer:
         self,
         scope_ref: str,
         keywords: list[KeywordIn],
+        language: str | None = None,
     ) -> tuple[dict[str, EmbeddingResult], dict[str, int]]:
-        namespace = grouping_namespace(scope_ref)
+        namespace = grouping_namespace(scope_ref, language)
         model_key = model_cache_key(self._embedding)
         cache_hits = 0
         cache_misses = 0
@@ -364,12 +372,8 @@ class KeywordGroupAnalyzer:
             digest = content_hash(item.text)
             cached: EmbeddingResult | None = None
             if self._settings.topic_embedding_cache_enabled and self._vectors is not None:
-                record = self._vectors.get(namespace, item.ref, model_key)
-                if (
-                    record is not None
-                    and record.content_hash == digest
-                    and record.dimensions > 0
-                ):
+                record = self._cached_vector(scope_ref, language, item.ref, model_key, digest)
+                if record is not None:
                     cached = EmbeddingResult(
                         vector=tuple(float(x) for x in record.embedding),
                         model_key=self._embedding.model_key,
@@ -411,20 +415,16 @@ class KeywordGroupAnalyzer:
         self,
         scope_ref: str,
         keywords: list[KeywordIn],
+        language: str | None = None,
     ) -> tuple[dict[str, EmbeddingResult], dict[str, int]]:
         if not self._settings.topic_embedding_cache_enabled or self._vectors is None:
             raise ValueError("embedding cache is required for keyword group clustering from cache")
-        namespace = grouping_namespace(scope_ref)
         model_key = model_cache_key(self._embedding)
         results: dict[str, EmbeddingResult] = {}
         missing = 0
         for item in keywords:
-            record = self._vectors.get(namespace, item.ref, model_key)
-            if (
-                record is None
-                or record.content_hash != content_hash(item.text)
-                or record.dimensions <= 0
-            ):
+            record = self._cached_vector(scope_ref, language, item.ref, model_key, content_hash(item.text))
+            if record is None:
                 missing += 1
                 continue
             results[item.ref] = EmbeddingResult(
@@ -440,6 +440,19 @@ class KeywordGroupAnalyzer:
                 "submit embedding batches before clustering"
             )
         return results, {"hits": len(keywords), "misses": 0}
+
+    def _cached_vector(self, scope_ref: str, language: str | None, ref: str, model_key: str, digest: str):
+        if self._vectors is None:
+            return None
+        namespaces = [grouping_namespace(scope_ref, language)]
+        legacy = grouping_namespace(scope_ref)
+        if legacy not in namespaces:
+            namespaces.append(legacy)
+        for namespace in namespaces:
+            record = self._vectors.get(namespace, ref, model_key)
+            if record is not None and record.content_hash == digest and record.dimensions > 0:
+                return record
+        return None
 
     def _scores_to_representative(
         self,

@@ -281,7 +281,7 @@ class KeywordGroupDatasetRepository:
                     "unchanged": True,
                 }
             if current is not None:
-                if self._revision_is_active(int(current["id"])):
+                if self._revision_is_referenced(int(current["id"])):
                     cur.execute(
                         """
                         UPDATE keyword_group_dataset_revisions
@@ -409,13 +409,14 @@ class KeywordGroupDatasetRepository:
             metadata=metadata,
         ) | {"raw_text": text}
 
-    def _revision_is_active(self, revision_id: int) -> bool:
+    def _revision_is_referenced(self, revision_id: int) -> bool:
+        """Any run, including completed and failed, holds a foreign key to the revision."""
         with self._conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT 1
                 FROM keyword_group_runs
-                WHERE revision_id = %s AND status IN ('queued', 'running')
+                WHERE revision_id = %s
                 LIMIT 1
                 """,
                 (revision_id,),

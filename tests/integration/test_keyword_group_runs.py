@@ -186,6 +186,36 @@ def test_active_run_keeps_its_dataset_revision_when_a_newer_snapshot_commits(cli
     _cleanup(scope)
 
 
+def test_completed_run_keeps_its_dataset_revision_when_a_newer_snapshot_commits(client: TestClient) -> None:
+    scope = _scope()
+    _sync(client, scope, ["may phat"])
+    created = client.post("/v1/keyword-groups/runs", json={"scope_ref": scope, "language": "vi"})
+    assert created.status_code == 202, created.text
+    run_id = created.json()["run_id"]
+    assert process_available(Database(_settings()), _settings(), HashEmbedding(), "worker-e") is True
+    finished = client.get(f"/v1/keyword-groups/runs/{run_id}")
+    assert finished.json()["status"] == "completed"
+    _sync(client, scope, ["on ap"])
+    row = _sql(
+        """
+        SELECT revisions.status
+        FROM keyword_group_runs AS runs
+        JOIN keyword_group_dataset_revisions AS revisions ON revisions.id = runs.revision_id
+        WHERE runs.run_id = %s
+        """,
+        (run_id,),
+        fetch=True,
+    )
+    assert row["status"] == "retained"
+    current = client.get(f"/v1/keyword-groups/datasets/{scope}", params={"language": "vi"})
+    assert current.status_code == 200, current.text
+    assert current.json()["revision"] == 2
+    still = client.get(f"/v1/keyword-groups/runs/{run_id}")
+    assert still.json()["status"] == "completed"
+    assert still.json()["dataset_revision"] == 1
+    _cleanup(scope)
+
+
 def test_create_run_language_matches_the_committed_dataset(client: TestClient) -> None:
     scope = _scope()
     _sync(client, scope, ["may phat dien", "may phat"])

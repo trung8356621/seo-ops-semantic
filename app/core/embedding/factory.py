@@ -12,5 +12,6 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
             model_name=settings.embedding_model,
             cache_dir=settings.model_cache_dir,
             lazy_load=settings.embedding_lazy_load,
+            memory_cache_max_items=settings.embedding_memory_cache_max_items,
         )
     raise ValueError(f"unsupported embedding provider: {settings.embedding_provider}")

@@ -5,6 +5,7 @@ import math
 import os
 import threading
 from array import array
+from collections import OrderedDict
 from pathlib import Path
 from typing import Sequence
 
@@ -25,16 +26,24 @@ class OnnxFastEmbedProvider:
         cache_dir: str,
         *,
         lazy_load: bool = True,
+        memory_cache_max_items: int = 4096,
     ) -> None:
+        if memory_cache_max_items < 0:
+            raise ValueError("memory_cache_max_items must be >= 0")
         self._model_name = model_name
         self._cache_dir = cache_dir
         self._lazy_load = lazy_load
+        self._memory_cache_max_items = int(memory_cache_max_items)
         self._model = None
         self._dimensions: int | None = None
+        self._load_lock = threading.Lock()
         self._embed_lock = threading.Lock()
-        self._memory: dict[str, tuple[float, ...]] = {}
+        self._memory: OrderedDict[str, tuple[float, ...]] = OrderedDict()
         self.cache_hits = 0
         self.cache_misses = 0
+        self.cache_evictions = 0
+        self.model_load_count = 0
+        self.last_load_error: str | None = None
 
         Path(cache_dir).mkdir(parents=True, exist_ok=True)
         os.environ.setdefault("FASTEMBED_CACHE_PATH", str(Path(cache_dir) / "fastembed"))
@@ -64,21 +73,46 @@ class OnnxFastEmbedProvider:
         return self._model is not None
 
     def release(self) -> None:
-        self._model = None
+        with self._load_lock:
+            self._model = None
+        with self._embed_lock:
+            self._memory.clear()
+
+    def cache_stats(self) -> dict[str, int]:
+        with self._embed_lock:
+            return {
+                "size": len(self._memory),
+                "max_items": self._memory_cache_max_items,
+                "hits": self.cache_hits,
+                "misses": self.cache_misses,
+                "evictions": self.cache_evictions,
+            }
 
     def load(self) -> None:
         if self._model is not None:
             return
-        from fastembed import TextEmbedding
+        with self._load_lock:
+            if self._model is not None:
+                return
+            try:
+                from fastembed import TextEmbedding
 
-        cache = str(Path(self._cache_dir) / "fastembed")
-        Path(cache).mkdir(parents=True, exist_ok=True)
-        self._model = TextEmbedding(model_name=self._model_name, cache_dir=cache)
-        # Probe dimensions once without logging the vector.
-        probe = list(self._model.embed(["dimension probe"]))
-        if not probe:
-            raise RuntimeError("embedding model returned empty probe")
-        self._dimensions = int(len(probe[0]))
+                cache = str(Path(self._cache_dir) / "fastembed")
+                Path(cache).mkdir(parents=True, exist_ok=True)
+                model = TextEmbedding(model_name=self._model_name, cache_dir=cache)
+                # Probe dimensions once without logging the vector.
+                probe = list(model.embed(["dimension probe"]))
+                if not probe:
+                    raise RuntimeError("embedding model returned empty probe")
+                self._dimensions = int(len(probe[0]))
+                self._model = model
+                self.model_load_count += 1
+                self.last_load_error = None
+            except Exception as exc:
+                self._model = None
+                self._dimensions = None
+                self.last_load_error = f"{exc.__class__.__name__}: {exc}"
+                raise
 
     def embed(self, text: str) -> EmbeddingResult:
         results = self.embed_batch([text])
@@ -150,10 +184,21 @@ class OnnxFastEmbedProvider:
         directory.mkdir(parents=True, exist_ok=True)
         return directory / digest
 
+    def _put_memory(self, digest: str, vector: tuple[float, ...]) -> None:
+        if self._memory_cache_max_items <= 0:
+            return
+        if digest in self._memory:
+            self._memory.move_to_end(digest)
+        self._memory[digest] = vector
+        while len(self._memory) > self._memory_cache_max_items:
+            self._memory.popitem(last=False)
+            self.cache_evictions += 1
+
     def _cached_vector(self, normalized: str) -> tuple[float, ...] | None:
         digest = self._cache_digest(normalized)
         memory = self._memory.get(digest)
         if memory is not None:
+            self._memory.move_to_end(digest)
             return memory
         path = self._cache_file(digest)
         if not path.is_file():
@@ -165,12 +210,12 @@ class OnnxFastEmbedProvider:
         values = array("d")
         values.frombytes(raw)
         vector = tuple(float(v) for v in values)
-        self._memory[digest] = vector
+        self._put_memory(digest, vector)
         return vector
 
     def _store_vector(self, normalized: str, vector: tuple[float, ...]) -> None:
         digest = self._cache_digest(normalized)
-        self._memory[digest] = vector
+        self._put_memory(digest, vector)
         path = self._cache_file(digest)
         temporary = path.with_suffix(".tmp")
         payload = array("d", vector)

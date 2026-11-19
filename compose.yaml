@@ -18,6 +18,7 @@ services:
     # Local-only: published on localhost. Not for production exposure.
     ports:
       - "127.0.0.1:5433:5432"
+    mem_limit: 256m
     restart: unless-stopped
 
   semantic-api:
@@ -45,6 +46,7 @@ services:
       DB_CONNECT_RETRIES: ${DB_CONNECT_RETRIES:-30}
       DB_CONNECT_RETRY_SECONDS: ${DB_CONNECT_RETRY_SECONDS:-2}
       EMBEDDING_LAZY_LOAD: ${EMBEDDING_LAZY_LOAD:-true}
+      EMBEDDING_MEMORY_CACHE_MAX_ITEMS: ${EMBEDDING_MEMORY_CACHE_MAX_ITEMS:-2048}
       TOPIC_CLUSTER_ALGORITHM: ${TOPIC_CLUSTER_ALGORITHM:-average_linkage}
       TOPIC_CLUSTER_SIMILARITY_THRESHOLD: ${TOPIC_CLUSTER_SIMILARITY_THRESHOLD:-0.74}
       TOPIC_MIN_MEMBER_SIMILARITY: ${TOPIC_MIN_MEMBER_SIMILARITY:-0.77}
@@ -79,6 +81,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+    mem_limit: 1024m
     restart: unless-stopped
 
   semantic-worker:
@@ -112,7 +115,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    mem_limit: 4g
+    mem_limit: 1024m
     cpus: 2
     restart: unless-stopped
 

@@ -54,31 +54,46 @@ def check_pgvector(database: Database) -> dict[str, Any]:
 
 
 def check_embedding(provider: EmbeddingProvider, *, force_load: bool = False) -> dict[str, Any]:
+    cache_stats_fn = getattr(provider, "cache_stats", None)
+    load_count = getattr(provider, "model_load_count", None)
     try:
         if not provider.is_loaded and not force_load:
-            return {
+            payload: dict[str, Any] = {
                 "status": "not_loaded",
                 "provider": provider.provider_key,
                 "model": provider.model_key,
                 "model_version": provider.model_version,
                 "dimensions": provider.dimensions,
             }
+            if load_count is not None:
+                payload["load_count"] = load_count
+            if callable(cache_stats_fn):
+                payload["cache"] = cache_stats_fn()
+            return payload
         if force_load or not provider.is_loaded:
             provider.load()
-        return {
+        payload = {
             "status": "ok",
             "provider": provider.provider_key,
             "model": provider.model_key,
             "model_version": provider.model_version,
             "dimensions": provider.dimensions,
         }
+        if load_count is not None:
+            payload["load_count"] = getattr(provider, "model_load_count", load_count)
+        if callable(cache_stats_fn):
+            payload["cache"] = cache_stats_fn()
+        return payload
     except Exception as exc:  # noqa: BLE001
-        return {
+        payload = {
             "status": "error",
             "provider": provider.provider_key,
             "model": provider.model_key,
             "error": str(exc),
         }
+        if load_count is not None:
+            payload["load_count"] = getattr(provider, "model_load_count", load_count)
+        return payload
 
 
 def build_health(

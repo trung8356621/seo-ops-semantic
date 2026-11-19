@@ -99,3 +99,22 @@ def test_ready_loads_model() -> None:
     assert ready is True
     assert payload["embedding"]["status"] == "ok"
     assert provider.is_loaded is True
+
+
+def test_repeated_ready_does_not_reload_already_loaded_model() -> None:
+    load_calls = 0
+
+    class _CountingProvider(_FakeProvider):
+        def load(self) -> None:
+            nonlocal load_calls
+            if self._loaded:
+                return
+            load_calls += 1
+            self._loaded = True
+
+    provider = _CountingProvider(loaded=False)
+    for _ in range(5):
+        payload, ready = build_ready(Settings(), _FakeDb(), provider)  # type: ignore[arg-type]
+        assert ready is True
+        assert payload["embedding"]["status"] == "ok"
+    assert load_calls == 1
